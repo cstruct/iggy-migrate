@@ -35,6 +35,15 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub fn eval(source: &str, env: &Env) -> Result<Vec<Op>, Error> {
+    eval_as(source, env)
+}
+
+/// Evaluates a migration to any type with a Dhall equivalent, e.g. the
+/// `{ replaces, ops }` record of a baseline.
+pub fn eval_as<T>(source: &str, env: &Env) -> Result<T, Error>
+where
+    T: serde_dhall::FromDhall + serde_dhall::StaticType,
+{
     if !env.all.contains(&env.name) {
         return Err(Error(format!("unknown environment `{}`", env.name)));
     }
@@ -54,7 +63,7 @@ pub fn eval(source: &str, env: &Env) -> Result<Vec<Op>, Error> {
         // Typechecks the result against the Rust `Op` type, so the prelude
         // cannot drift from `op.rs` without every evaluation failing.
         .static_type_annotation()
-        .parse::<Vec<Op>>()
+        .parse::<T>()
         .map_err(|e| Error(describe(&e.to_string(), source)))
 }
 
@@ -94,19 +103,26 @@ fn describe(raw: &str, source: &str) -> String {
 
 /// Hash of the evaluated ops, used as the migration checksum. Formatting or
 /// refactoring a file leaves it unchanged; changing what it does changes it.
-pub fn checksum(ops: &[Op]) -> String {
+pub fn checksum<T: serde::Serialize + ?Sized>(value: &T) -> String {
     use sha2::{Digest, Sha256};
-    let json = serde_json::to_vec(ops).expect("ops serialize to JSON");
+    let json = serde_json::to_vec(value).expect("migration serializes to JSON");
     let digest = Sha256::digest(&json);
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
     format!("sha256:{hex}")
 }
 
-fn label(s: &str) -> String {
-    format!("`{}`", s.replace('`', ""))
+pub fn label(s: &str) -> String {
+    const KEYWORDS: &[&str] = &[
+        "if", "then", "else", "let", "in", "as", "using", "merge", "missing", "Infinity", "NaN",
+        "Some", "toMap", "assert", "forall", "with", "showConstructor", "None",
+    ];
+    let simple = s.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !KEYWORDS.contains(&s);
+    if simple { s.to_string() } else { format!("`{}`", s.replace('`', "")) }
 }
 
-fn text_literal(s: &str) -> String {
+pub fn text_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

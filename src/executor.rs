@@ -68,7 +68,7 @@ pub enum Mode<'a> {
     DryRun(&'a mut Planned),
 }
 
-fn key(op: &Op) -> String {
+pub fn key(op: &Op) -> String {
     match op {
         Op::CreateStream { name } | Op::DeleteStream { name } => name.clone(),
         Op::CreateTopic { stream, name, .. } | Op::DeleteTopic { stream, name } => {
@@ -79,7 +79,7 @@ fn key(op: &Op) -> String {
     }
 }
 
-fn ancestors(key: &str) -> impl Iterator<Item = String> + '_ {
+pub fn ancestors(key: &str) -> impl Iterator<Item = String> + '_ {
     key.match_indices('/').map(|(i, _)| key[..i].to_string())
 }
 
@@ -119,7 +119,7 @@ pub async fn run(client: &IggyClient, op: &Op, mode: Mode<'_>) -> Result<Action>
     Ok(action)
 }
 
-fn creates(op: &Op) -> bool {
+pub fn creates(op: &Op) -> bool {
     matches!(op, Op::CreateStream { .. } | Op::CreateTopic { .. } | Op::CreateConsumerGroup { .. })
 }
 

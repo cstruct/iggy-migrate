@@ -20,6 +20,9 @@ const BATCH: u32 = 100;
 pub enum Status {
     Applied,
     Failed,
+    /// A baseline marked applied without running it, because every migration
+    /// it replaces had already been applied.
+    Baselined,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +35,9 @@ pub struct Event {
     pub ops: Vec<Op>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For a baseline, the ids of the migrations it replaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<String>,
     pub applied_at: String,
     pub duration_ms: u64,
     pub runner: String,

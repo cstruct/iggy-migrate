@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use serde_dhall::StaticType;
 
 use crate::op::Op;
 use crate::{dhall, executor, ledger};
@@ -17,7 +19,43 @@ pub struct Migration {
     pub id: String,
     pub ops: Vec<Op>,
     pub checksum: String,
+    /// For a baseline, the migrations it replaces; empty otherwise.
+    pub replaces: Vec<Replaced>,
 }
+
+impl Migration {
+    pub fn is_baseline(&self) -> bool {
+        !self.replaces.is_empty()
+    }
+
+    /// The migrations this baseline replaces directly.
+    pub fn direct_replaces(&self) -> impl Iterator<Item = &Replaced> {
+        self.replaces.iter().filter(|r| r.parent.is_none())
+    }
+}
+
+/// A migration squashed into a baseline, with the checksum it had in the
+/// environment being evaluated.
+///
+/// When a baseline is itself squashed, the migrations it replaced are carried
+/// along with `parent` naming it, so servers that applied the originals but
+/// never the intermediate baseline are still recognised. (Dhall has no
+/// recursive types, hence a flat list rather than a tree.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, StaticType)]
+pub struct Replaced {
+    pub id: String,
+    pub checksum: String,
+    pub parent: Option<String>,
+}
+
+/// What a `*_baseline.dhall` file evaluates to.
+#[derive(Debug, Deserialize, StaticType)]
+pub struct Baseline {
+    pub replaces: Vec<Replaced>,
+    pub ops: Vec<Op>,
+}
+
+pub const BASELINE_SUFFIX: &str = "_baseline";
 
 pub fn load_dir(dir: &Path, env: &dhall::Env) -> Result<Vec<Migration>> {
     let mut paths = Vec::new();
@@ -47,12 +85,24 @@ fn load(path: &Path, env: &dhall::Env) -> Result<Migration> {
     let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
     validate_id(&id)?;
     let source = fs::read_to_string(path)?;
-    let ops = dhall::eval(&source, env)?;
+    let (ops, replaces) = if id.ends_with(BASELINE_SUFFIX) {
+        let baseline: Baseline = dhall::eval_as(&source, env)?;
+        if baseline.replaces.is_empty() {
+            bail!("a baseline must replace at least one migration");
+        }
+        (baseline.ops, baseline.replaces)
+    } else {
+        (dhall::eval(&source, env)?, Vec::new())
+    };
     for (i, op) in ops.iter().enumerate() {
         validate(op).with_context(|| format!("op {} ({op:?})", i + 1))?;
     }
-    let checksum = dhall::checksum(&ops);
-    Ok(Migration { id, ops, checksum })
+    let checksum = if replaces.is_empty() {
+        dhall::checksum(&ops)
+    } else {
+        dhall::checksum(&(&replaces, &ops))
+    };
+    Ok(Migration { id, ops, checksum, replaces })
 }
 
 fn validate_id(id: &str) -> Result<()> {

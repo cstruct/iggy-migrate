@@ -19,6 +19,7 @@ iggy-migrate status              # applied / pending / CHANGED / MISSING
 iggy-migrate plan                # what `up` would do, without changing anything
 iggy-migrate up                  # rehearse, then apply pending migrations
 iggy-migrate verify --all-envs   # replay all migrations on an empty server
+iggy-migrate squash              # replace all migrations with one baseline
 iggy-migrate eval <file>         # print a file's ops, without connecting
 ```
 
@@ -47,6 +48,29 @@ Rehearsals copy metadata, not messages, and cannot catch differences in server
 config (values left to the server default), permissions or capacity.
 Containers are labelled `iggy-migrate=rehearsal` and removed afterwards,
 including on Ctrl-C.
+
+## Squashing (baselines)
+
+`squash [--through <id>]` replaces every migration up to and including `<id>`
+(all of them by default) with one `<timestamp>_baseline.dhall` that creates
+their final state, and deletes the replaced files. For each environment it
+folds the history (deletes drop what they remove, recreated resources keep
+their last config), then proves in Docker that the history and the baseline
+produce identical streams, topics and groups before writing anything.
+
+The baseline records each replaced migration's checksum. On `up`, a server
+that has:
+
+- **applied all of them** marks the baseline applied without running it;
+- **applied none of them** runs the baseline like any migration;
+- **applied only some** is refused (`PARTIAL` in `status`). Apply the rest
+  from the commit before the squash, e.g. by pointing `--dir` at a checkout
+  of it, then run `up` again.
+
+So before squashing, run `up` on every long-lived server if you want them all
+to take the fast path. Baselines can themselves be squashed later: the new
+baseline carries the old one's replaced migrations along, so servers that are
+several squashes behind are still recognised. Don't edit generated baselines.
 
 ## Writing migrations
 

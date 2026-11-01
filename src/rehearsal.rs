@@ -185,3 +185,33 @@ pub async fn apply(client: &IggyClient, migrations: &[&Migration]) -> Result<Sum
     }
     Ok(summary)
 }
+
+/// Describes every stream, topic and consumer group except the ledger, one
+/// line each and sorted, so two servers' states can be compared.
+pub async fn snapshot(client: &IggyClient) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    for stream in client.get_streams().await? {
+        if stream.name == ledger::STREAM {
+            continue;
+        }
+        let stream_id = Identifier::named(&stream.name)?;
+        lines.push(format!("stream {}", stream.name));
+        for topic in client.get_topics(&stream_id).await? {
+            let topic_id = Identifier::named(&topic.name)?;
+            lines.push(format!(
+                "topic {}/{}: partitions {}, expiry {}, max size {}, compression {}",
+                stream.name,
+                topic.name,
+                topic.partitions_count,
+                topic.message_expiry,
+                topic.max_topic_size,
+                topic.compression_algorithm
+            ));
+            for group in client.get_consumer_groups(&stream_id, &topic_id).await? {
+                lines.push(format!("group {}/{}/{}", stream.name, topic.name, group.name));
+            }
+        }
+    }
+    lines.sort();
+    Ok(lines)
+}
