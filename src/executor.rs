@@ -53,6 +53,9 @@ impl Planned {
 
     fn record(&mut self, op: &Op) {
         let key = key(op);
+        if matches!(op, Op::UpdateTopic { .. }) {
+            return;
+        }
         if creates(op) {
             self.deleted.retain(|k| k != &key && !ancestors(k).any(|a| a == key));
             self.created.insert(key);
@@ -71,7 +74,9 @@ pub enum Mode<'a> {
 pub fn key(op: &Op) -> String {
     match op {
         Op::CreateStream { name } | Op::DeleteStream { name } => name.clone(),
-        Op::CreateTopic { stream, name, .. } | Op::DeleteTopic { stream, name } => {
+        Op::CreateTopic { stream, name, .. }
+        | Op::UpdateTopic { stream, name, .. }
+        | Op::DeleteTopic { stream, name } => {
             format!("{stream}/{name}")
         }
         Op::CreateConsumerGroup { stream, topic, name }
@@ -108,7 +113,7 @@ pub async fn run(client: &IggyClient, op: &Op, mode: Mode<'_>) -> Result<Action>
         Mode::Apply => None,
     };
     let action = match planned {
-        Some(exists) => planned_action(op, exists),
+        Some(exists) => planned_action(op, &key, exists)?,
         None => check(client, op).await?,
     };
     match mode {
@@ -131,12 +136,16 @@ async fn resource_exists(client: &IggyClient, key: &str) -> Result<bool> {
     })
 }
 
-fn planned_action(op: &Op, exists: bool) -> Action {
-    match (creates(op), exists) {
-        (true, false) | (false, true) => Action::Apply,
-        (true, true) => Action::Skip("created earlier in this run"),
-        (false, false) => Action::Skip("deleted earlier in this run"),
-    }
+fn planned_action(op: &Op, key: &str, exists: bool) -> Result<Action> {
+    Ok(match (op, creates(op), exists) {
+        (Op::UpdateTopic { .. }, _, true) => Action::Apply,
+        (Op::UpdateTopic { .. }, _, false) => {
+            bail!("cannot update {key}: topic does not exist")
+        }
+        (_, true, false) | (_, false, true) => Action::Apply,
+        (_, true, true) => Action::Skip("created earlier in this run"),
+        (_, false, false) => Action::Skip("deleted earlier in this run"),
+    })
 }
 
 async fn check(client: &IggyClient, op: &Op) -> Result<Action> {
@@ -172,6 +181,16 @@ async fn check(client: &IggyClient, op: &Op) -> Result<Action> {
             }
             Action::Skip("already exists")
         }
+        Op::UpdateTopic { stream, name, .. } => {
+            let Some(existing) = get_topic(client, stream, name).await? else {
+                bail!("cannot update {stream}/{name}: topic does not exist");
+            };
+            if topic_update(op, &existing)?.is_empty() {
+                Action::Skip("already up to date")
+            } else {
+                Action::Apply
+            }
+        }
         Op::DeleteTopic { stream, name } => match get_topic(client, stream, name).await? {
             Some(_) => Action::Apply,
             None => Action::Skip("already absent"),
@@ -204,7 +223,28 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
                 max_topic_size: max_size.as_deref().map(parse_size).transpose()?,
                 ..Default::default()
             };
-            client.create_topic(&id(stream)?, name, &options).await?;
+            client.create_topic(&id(stream)?, name, &options).await.map_err(size_hint)?;
+        }
+        Op::UpdateTopic { stream, name, .. } => {
+            let Some(existing) = get_topic(client, stream, name).await? else {
+                bail!("cannot update {stream}/{name}: topic does not exist");
+            };
+            let mut options = TopicUpdateOptions::default();
+            for change in topic_update(op, &existing)? {
+                match change {
+                    Change::Partitions(n) => {
+                        client.create_partitions(&id(stream)?, &id(name)?, n).await?
+                    }
+                    Change::Expiry(e) => options.message_expiry = Some(e),
+                    Change::MaxSize(s) => options.max_topic_size = Some(s),
+                }
+            }
+            if options != TopicUpdateOptions::default() {
+                client
+                    .update_topic(&id(stream)?, &id(name)?, &existing.name, &options)
+                    .await
+                    .map_err(size_hint)?;
+            }
         }
         Op::DeleteTopic { stream, name } => client.delete_topic(&id(stream)?, &id(name)?).await?,
         Op::CreateConsumerGroup { stream, topic, name } => {
@@ -215,6 +255,60 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The server's error for a max size below the segment size prints the wrong
+/// numbers, so say what the limit actually is.
+fn size_hint(e: IggyError) -> anyhow::Error {
+    let hint = e.to_string().contains("segment size").then_some(
+        "max_size must be at least the topic's segment size (1 GiB by default; note 1 GB < 1 GiB)",
+    );
+    match hint {
+        Some(hint) => anyhow::Error::new(e).context(hint),
+        None => e.into(),
+    }
+}
+
+enum Change {
+    /// Partitions to add.
+    Partitions(u32),
+    Expiry(IggyExpiry),
+    MaxSize(MaxTopicSize),
+}
+
+/// What an `UpdateTopic` would change on `existing`; empty when it is
+/// already up to date. Shrinking a topic is an error, since Iggy removes
+/// partitions by deleting them and their messages.
+fn topic_update(op: &Op, existing: &TopicDetails) -> Result<Vec<Change>> {
+    let Op::UpdateTopic { stream, name, partitions, message_expiry, max_size } = op else {
+        unreachable!("only called for UpdateTopic");
+    };
+    let mut changes = Vec::new();
+    if let Some(want) = partitions {
+        let have = u64::from(existing.partitions_count);
+        if *want < have {
+            bail!(
+                "cannot reduce {stream}/{name} from {have} to {want} partitions: removing \
+                 partitions deletes their messages"
+            );
+        }
+        if *want > have {
+            changes.push(Change::Partitions(u32::try_from(want - have)?));
+        }
+    }
+    if let Some(want) = message_expiry {
+        let want = parse_expiry(want)?;
+        if existing.message_expiry != want {
+            changes.push(Change::Expiry(want));
+        }
+    }
+    if let Some(want) = max_size {
+        let want = parse_size(want)?;
+        if existing.max_topic_size != want {
+            changes.push(Change::MaxSize(want));
+        }
+    }
+    Ok(changes)
 }
 
 async fn get_topic(client: &IggyClient, stream: &str, name: &str) -> Result<Option<TopicDetails>> {

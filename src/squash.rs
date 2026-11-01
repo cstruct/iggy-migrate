@@ -34,6 +34,28 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
                 Some(_) => {}
                 None => state.push(op.clone()),
             }
+        } else if let Op::UpdateTopic { partitions, message_expiry, max_size, .. } = op {
+            let Some(Op::CreateTopic {
+                partitions: p,
+                message_expiry: e,
+                max_size: s,
+                ..
+            }) = existing.map(|i| &mut state[i])
+            else {
+                bail!("history updates topic {k} before creating it");
+            };
+            if let Some(want) = partitions {
+                if want < p {
+                    bail!("history reduces topic {k} from {p} to {want} partitions");
+                }
+                *p = *want;
+            }
+            if message_expiry.is_some() {
+                e.clone_from(message_expiry);
+            }
+            if max_size.is_some() {
+                s.clone_from(max_size);
+            }
         } else {
             let prefix = format!("{k}/");
             state.retain(|s| {
@@ -191,7 +213,10 @@ fn render_op(op: &Op) -> String {
             t(topic),
             t(name)
         ),
-        Op::DeleteStream { .. } | Op::DeleteTopic { .. } | Op::DeleteConsumerGroup { .. } => {
+        Op::UpdateTopic { .. }
+        | Op::DeleteStream { .. }
+        | Op::DeleteTopic { .. }
+        | Op::DeleteConsumerGroup { .. } => {
             unreachable!("a folded state contains only creates")
         }
     }
@@ -334,6 +359,32 @@ mod tests {
             stream("a"),
         ];
         assert_eq!(fold(&history).unwrap(), vec![stream("a"), topic("a", "t", 4)]);
+    }
+
+    fn update(partitions: Option<u64>, expiry: Option<&str>) -> Op {
+        Op::UpdateTopic {
+            stream: "a".into(),
+            name: "t".into(),
+            partitions,
+            message_expiry: expiry.map(Into::into),
+            max_size: None,
+        }
+    }
+
+    #[test]
+    fn updates_are_folded_into_the_create() {
+        let history =
+            vec![stream("a"), topic("a", "t", 1), update(Some(4), None), update(None, Some("7d"))];
+        let Op::CreateTopic { partitions, message_expiry, .. } = &fold(&history).unwrap()[1] else {
+            panic!("expected a topic");
+        };
+        assert_eq!((*partitions, message_expiry.as_deref()), (4, Some("7d")));
+    }
+
+    #[test]
+    fn invalid_updates_in_history_are_errors() {
+        assert!(fold(&[stream("a"), update(Some(4), None)]).is_err());
+        assert!(fold(&[stream("a"), topic("a", "t", 4), update(Some(2), None)]).is_err());
     }
 
     #[test]

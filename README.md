@@ -91,14 +91,42 @@ in  [ Op.CreateStream { name = "orders" } ]
 
 Available in every file:
 
-- `Op`: `CreateStream`, `DeleteStream`, `CreateTopic`, `DeleteTopic`,
-  `CreateConsumerGroup`, `DeleteConsumerGroup`.
+- `Op`: `CreateStream`, `DeleteStream`, `CreateTopic`, `UpdateTopic`,
+  `DeleteTopic`, `CreateConsumerGroup`, `DeleteConsumerGroup`.
 - `Topic::{ stream, name }`: a topic with defaults (`partitions = 1`, server
   default expiry and max size).
+- `TopicUpdate::{ stream, name }`: an update that changes nothing until you
+  set `partitions`, `message_expiry` or `max_size` (see below).
 - `map`, `concat`: list helpers (the Dhall Prelude is not available).
 - `env.name : Text` and `env.kind : Env`, a union of `--environments`. Dhall
   cannot compare `Text`, so branch on `env.kind` with `merge`; leaving out an
   environment is a type error.
+
+### Updating topics
+
+```dhall
+[ Op.UpdateTopic
+    TopicUpdate::{
+    , stream = "orders"
+    , name = "events"
+    , partitions = Some (merge { dev = 2, staging = 6, prod = 24 } env.kind)
+    , message_expiry = Some "14d"
+    }
+]
+```
+
+`UpdateTopic` changes a topic in place, keeping its messages. Fields are
+targets, not deltas: `partitions = Some 24` adds partitions until there are
+24, and an update that already holds is skipped. Partitions can only grow,
+because Iggy removes partitions by deleting them and their messages; to
+shrink, delete and recreate the topic. `max_size` must be at least the
+segment size (1 GiB by default; `"1 GB"` is smaller than that).
+
+Each topic may be created or updated once per migration, so a migration that
+failed halfway can be rerun; put all changes to a topic in one op.
+
+Adding partitions changes which partition a key hashes to, so per-key
+ordering does not hold across the change.
 
 ## Guarantees
 

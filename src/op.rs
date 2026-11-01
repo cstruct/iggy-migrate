@@ -18,6 +18,15 @@ pub enum Op {
         message_expiry: Option<String>,
         max_size: Option<String>,
     },
+    /// Sets the given fields of an existing topic; `None` leaves a field
+    /// alone. Partitions can only grow, since removing one deletes its data.
+    UpdateTopic {
+        stream: String,
+        name: String,
+        partitions: Option<u64>,
+        message_expiry: Option<String>,
+        max_size: Option<String>,
+    },
     DeleteTopic {
         stream: String,
         name: String,

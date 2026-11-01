@@ -10,10 +10,23 @@ let Topic =
         { partitions = 1, message_expiry = None Text, max_size = None Text }
       }
 
+let TopicUpdate =
+      { Type =
+          { stream : Text
+          , name : Text
+          , partitions : Optional Natural
+          , message_expiry : Optional Text
+          , max_size : Optional Text
+          }
+      , default =
+        { partitions = None Natural, message_expiry = None Text, max_size = None Text }
+      }
+
 let Op =
       < CreateStream : { name : Text }
       | DeleteStream : { name : Text }
       | CreateTopic : Topic.Type
+      | UpdateTopic : TopicUpdate.Type
       | DeleteTopic : { stream : Text, name : Text }
       | CreateConsumerGroup : { stream : Text, topic : Text, name : Text }
       | DeleteConsumerGroup : { stream : Text, topic : Text, name : Text }

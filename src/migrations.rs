@@ -97,6 +97,7 @@ fn load(path: &Path, env: &dhall::Env) -> Result<Migration> {
     for (i, op) in ops.iter().enumerate() {
         validate(op).with_context(|| format!("op {} ({op:?})", i + 1))?;
     }
+    validate_updates(&ops)?;
     let checksum = if replaces.is_empty() {
         dhall::checksum(&ops)
     } else {
@@ -122,15 +123,14 @@ fn validate(op: &Op) -> Result<()> {
     let (stream, names): (&str, Vec<&str>) = match op {
         Op::CreateStream { name } | Op::DeleteStream { name } => (name, vec![name]),
         Op::CreateTopic { stream, name, partitions, message_expiry, max_size } => {
-            if *partitions == 0 || *partitions > u64::from(u32::MAX) {
-                bail!("partitions must be between 1 and {}", u32::MAX);
+            validate_topic(Some(*partitions), message_expiry, max_size)?;
+            (stream, vec![stream, name])
+        }
+        Op::UpdateTopic { stream, name, partitions, message_expiry, max_size } => {
+            if partitions.is_none() && message_expiry.is_none() && max_size.is_none() {
+                bail!("an update must set at least one of partitions, message_expiry, max_size");
             }
-            if let Some(e) = message_expiry {
-                executor::parse_expiry(e)?;
-            }
-            if let Some(s) = max_size {
-                executor::parse_size(s)?;
-            }
+            validate_topic(*partitions, message_expiry, max_size)?;
             (stream, vec![stream, name])
         }
         Op::DeleteTopic { stream, name } => (stream, vec![stream, name]),
@@ -142,6 +142,46 @@ fn validate(op: &Op) -> Result<()> {
     }
     if stream == ledger::STREAM {
         bail!("migrations must not modify the `{}` ledger stream", ledger::STREAM);
+    }
+    Ok(())
+}
+
+fn validate_topic(
+    partitions: Option<u64>,
+    message_expiry: &Option<String>,
+    max_size: &Option<String>,
+) -> Result<()> {
+    if let Some(p) = partitions
+        && (p == 0 || p > u64::from(u32::MAX))
+    {
+        bail!("partitions must be between 1 and {}", u32::MAX);
+    }
+    if let Some(e) = message_expiry {
+        executor::parse_expiry(e)?;
+    }
+    if let Some(s) = max_size {
+        executor::parse_size(s)?;
+    }
+    Ok(())
+}
+
+/// Allows each topic one change per migration: a create or a single update.
+/// Rerunning a migration that failed halfway would otherwise find the topic
+/// already changed by a later op, so an earlier create or update would no
+/// longer match it; write the final config in one op instead.
+fn validate_updates(ops: &[Op]) -> Result<()> {
+    let mut changed = Vec::new();
+    for op in ops {
+        if let Op::CreateTopic { .. } | Op::UpdateTopic { .. } = op {
+            let key = executor::key(op);
+            if changed.contains(&key) {
+                bail!(
+                    "topic {key} is created or updated more than once in this migration; \
+                     combine the changes into one op"
+                );
+            }
+            changed.push(key);
+        }
     }
     Ok(())
 }
@@ -203,6 +243,30 @@ mod tests {
         assert!(validate(&topic(0, None)).is_err());
         assert!(validate(&topic(1, Some("whenever"))).is_err());
         assert!(validate(&topic(1, Some("7d"))).is_ok());
+    }
+
+    #[test]
+    fn invalid_updates_are_rejected() {
+        let update = |partitions| Op::UpdateTopic {
+            stream: "s".into(),
+            name: "t".into(),
+            partitions,
+            message_expiry: None,
+            max_size: None,
+        };
+        assert!(validate(&update(None)).is_err());
+        assert!(validate(&update(Some(0))).is_err());
+        assert!(validate(&update(Some(4))).is_ok());
+        let create = Op::CreateTopic {
+            stream: "s".into(),
+            name: "t".into(),
+            partitions: 1,
+            message_expiry: None,
+            max_size: None,
+        };
+        assert!(validate_updates(&[create, update(Some(4))]).is_err());
+        assert!(validate_updates(&[update(Some(4)), update(Some(5))]).is_err());
+        assert!(validate_updates(&[update(Some(4))]).is_ok());
     }
 
     #[test]
