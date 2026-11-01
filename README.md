@@ -18,6 +18,7 @@ iggy-migrate new create_orders   # migrations/20261101120000_create_orders.dhall
 iggy-migrate status              # applied / pending / CHANGED / MISSING
 iggy-migrate plan                # what `up` would do, without changing anything
 iggy-migrate up                  # rehearse, then apply pending migrations
+iggy-migrate drift               # compare the server with the applied migrations
 iggy-migrate verify --all-envs   # replay all migrations on an empty server
 iggy-migrate squash              # replace all migrations with one baseline
 iggy-migrate eval <file>         # print a file's ops, without connecting
@@ -30,6 +31,26 @@ iggy-migrate eval <file>         # print a file's ops, without connecting
 | `--env`          | `IGGY_MIGRATE_ENV`          | `dev`                             |
 | `--environments` | `IGGY_MIGRATE_ENVIRONMENTS` | `dev,staging,prod`                |
 | `--rehearsal-image` | `IGGY_MIGRATE_REHEARSAL_IMAGE` | target's version (`up`), `apache/iggy:0.9.0` (`verify`) |
+| `--allow-deletes` (`up`) | `IGGY_MIGRATE_ALLOW_DELETES` | off |
+
+### Deletes
+
+`up` refuses to run pending migrations that delete a stream, topic or
+consumer group unless given `--allow-deletes`, because deleting drops its
+messages and consumer offsets for good. `plan` shows those ops as `DELETE`.
+Shortening `message_expiry` or lowering `max_size` can also drop messages
+and is not guarded.
+
+### CI
+
+| Command | Exit code |
+| --- | --- |
+| `status` | 1 if any migration is CHANGED, PARTIAL or MISSING |
+| `plan --detailed-exitcode` | 2 if there is something to apply, 0 if not |
+| `drift` | 1 if the server differs from the applied migrations |
+
+`status`, `plan` and `drift` take `--json` for machine-readable output on
+stdout; errors and refusals still go to stderr as text.
 
 ## Rehearsals (requires Docker)
 
@@ -48,6 +69,24 @@ Rehearsals copy metadata, not messages, and cannot catch differences in server
 config (values left to the server default), permissions or capacity.
 Containers are labelled `iggy-migrate=rehearsal` and removed afterwards,
 including on Ctrl-C.
+
+## Drift
+
+`drift` folds the applied migrations into the state they should have
+produced (as `squash` does) and compares it with the server:
+
+```
+unmanaged  stream legacy
+changed    topic orders/audit: partitions 3 (want 1)
+missing    consumer_group orders/events/billing
+```
+
+`unmanaged` is on the server but created by no migration, `changed` has a
+config the migrations did not set, and `missing` was created by a migration
+but is gone. Like `up`, it only compares settings a migration set: a topic
+left to the default expiry is not reported when its expiry changes. It
+counts only applied migrations, so run it after `up` to check the whole
+picture; a failed migration's partial work shows up as drift.
 
 ## Squashing (baselines)
 
@@ -96,7 +135,24 @@ Available in every file:
 - `Topic::{ stream, name }`: a topic with defaults (`partitions = 1`, server
   default expiry and max size).
 - `TopicUpdate::{ stream, name }`: an update that changes nothing until you
-  set `partitions`, `message_expiry` or `max_size` (see below).
+  set `partitions`, `message_expiry`, `max_size` or `compression` (see
+  below).
+
+`Topic` settings, all optional except `partitions`:
+
+| Field | Values | Default | Updatable |
+| --- | --- | --- | --- |
+| `partitions` | 1 or more | 1 | grow only |
+| `message_expiry` | `"7d"`, `"1h 30m"`, `"none"` | never expire | yes |
+| `max_size` | `"2 GiB"`, `"unlimited"` | unlimited | yes |
+| `compression` | `"none"`, `"gzip"` | none | yes |
+| `segment_size` | `"256 MiB"` | 1 GiB | no |
+| `durability` | `"replicated"`, `"persisted"` | replicated | no |
+
+Iggy only allows changing expiry, max size and compression after creation,
+so changing `segment_size` or `durability` means recreating the topic.
+`compression` is recorded on the topic, but Iggy 0.9 does not compress
+payloads yet.
 - `map`, `concat`: list helpers (the Dhall Prelude is not available).
 - `env.name : Text` and `env.kind : Env`, a union of `--environments`. Dhall
   cannot compare `Text`, so branch on `env.kind` with `merge`; leaving out an
@@ -120,7 +176,7 @@ targets, not deltas: `partitions = Some 24` adds partitions until there are
 24, and an update that already holds is skipped. Partitions can only grow,
 because Iggy removes partitions by deleting them and their messages; to
 shrink, delete and recreate the topic. `max_size` must be at least the
-segment size (1 GiB by default; `"1 GB"` is smaller than that).
+`segment_size` (1 GiB by default; `"1 GB"` is smaller than that).
 
 Each topic may be created or updated once per migration, so a migration that
 failed halfway can be rerun; put all changes to a topic in one op.
@@ -140,7 +196,24 @@ ordering does not hold across the change.
   different `--env` against the same server is refused.
 - **The ledger is off limits.** Migrations cannot touch the `migration` stream.
 
-Not handled: concurrent runners. Run `up` from one place (e.g. a single CI job).
+### Concurrent runners
+
+There is no lock: Iggy has nothing to build one on that a crashed runner
+could not leave held. Run `up` from one place per server, e.g. one CI job
+with a concurrency group (`concurrency:` in GitHub Actions).
+
+If two runners do overlap on the same migrations, both see them pending and
+start applying. Per op, one runner's check passes and creates the resource;
+the other's create then fails with "already exists", so it stops and records
+a failed event, which `status` ignores. Running `up` again reports nothing to
+apply. Worse cases:
+
+- Runners on different commits can interleave ops from different
+  migrations, or apply a file one of them has since changed. The ledger keeps
+  the first applied checksum, so `status` then reports CHANGED for the other.
+- A delete in one runner can race a create in another, leaving the server in
+  a state neither intended. `drift` shows it.
+- Two runners can both mark the same baseline, which is harmless.
 
 ## Local server
 

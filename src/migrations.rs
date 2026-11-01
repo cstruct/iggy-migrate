@@ -122,15 +122,37 @@ fn validate_id(id: &str) -> Result<()> {
 fn validate(op: &Op) -> Result<()> {
     let (stream, names): (&str, Vec<&str>) = match op {
         Op::CreateStream { name } | Op::DeleteStream { name } => (name, vec![name]),
-        Op::CreateTopic { stream, name, partitions, message_expiry, max_size } => {
-            validate_topic(Some(*partitions), message_expiry, max_size)?;
+        Op::CreateTopic {
+            stream,
+            name,
+            partitions,
+            message_expiry,
+            max_size,
+            compression,
+            segment_size,
+            durability,
+        } => {
+            validate_topic(Some(*partitions), message_expiry, max_size, compression)?;
+            if let Some(s) = segment_size {
+                executor::parse_segment_size(s)?;
+            }
+            if let Some(d) = durability {
+                executor::parse_durability(d)?;
+            }
             (stream, vec![stream, name])
         }
-        Op::UpdateTopic { stream, name, partitions, message_expiry, max_size } => {
-            if partitions.is_none() && message_expiry.is_none() && max_size.is_none() {
-                bail!("an update must set at least one of partitions, message_expiry, max_size");
+        Op::UpdateTopic { stream, name, partitions, message_expiry, max_size, compression } => {
+            if partitions.is_none()
+                && message_expiry.is_none()
+                && max_size.is_none()
+                && compression.is_none()
+            {
+                bail!(
+                    "an update must set at least one of partitions, message_expiry, max_size, \
+                     compression"
+                );
             }
-            validate_topic(*partitions, message_expiry, max_size)?;
+            validate_topic(*partitions, message_expiry, max_size, compression)?;
             (stream, vec![stream, name])
         }
         Op::DeleteTopic { stream, name } => (stream, vec![stream, name]),
@@ -150,6 +172,7 @@ fn validate_topic(
     partitions: Option<u64>,
     message_expiry: &Option<String>,
     max_size: &Option<String>,
+    compression: &Option<String>,
 ) -> Result<()> {
     if let Some(p) = partitions
         && (p == 0 || p > u64::from(u32::MAX))
@@ -161,6 +184,9 @@ fn validate_topic(
     }
     if let Some(s) = max_size {
         executor::parse_size(s)?;
+    }
+    if let Some(c) = compression {
+        executor::parse_compression(c)?;
     }
     Ok(())
 }
@@ -239,6 +265,9 @@ mod tests {
             partitions,
             message_expiry: expiry.map(Into::into),
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         };
         assert!(validate(&topic(0, None)).is_err());
         assert!(validate(&topic(1, Some("whenever"))).is_err());
@@ -253,6 +282,7 @@ mod tests {
             partitions,
             message_expiry: None,
             max_size: None,
+            compression: None,
         };
         assert!(validate(&update(None)).is_err());
         assert!(validate(&update(Some(0))).is_err());
@@ -263,6 +293,9 @@ mod tests {
             partitions: 1,
             message_expiry: None,
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         };
         assert!(validate_updates(&[create, update(Some(4))]).is_err());
         assert!(validate_updates(&[update(Some(4)), update(Some(5))]).is_err());

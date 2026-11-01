@@ -8,7 +8,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::dhall::{self, label, text_literal};
-use crate::executor::{creates, key, parse_expiry, parse_size};
+use crate::executor::{
+    creates, key, parse_compression, parse_durability, parse_expiry, parse_segment_size, parse_size,
+};
 use crate::migrations::{self, BASELINE_SUFFIX, Baseline, Migration, Replaced};
 use crate::op::Op;
 use crate::rehearsal;
@@ -34,11 +36,12 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
                 Some(_) => {}
                 None => state.push(op.clone()),
             }
-        } else if let Op::UpdateTopic { partitions, message_expiry, max_size, .. } = op {
+        } else if let Op::UpdateTopic { partitions, message_expiry, max_size, compression, .. } = op {
             let Some(Op::CreateTopic {
                 partitions: p,
                 message_expiry: e,
                 max_size: s,
+                compression: c,
                 ..
             }) = existing.map(|i| &mut state[i])
             else {
@@ -56,6 +59,9 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
             if max_size.is_some() {
                 s.clone_from(max_size);
             }
+            if compression.is_some() {
+                c.clone_from(compression);
+            }
         } else {
             let prefix = format!("{k}/");
             state.retain(|s| {
@@ -68,20 +74,37 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
 }
 
 /// Whether re-creating `existing` with `op` fails, mirroring the executor:
-/// fields `op` leaves to the server default are not compared.
+/// settings `op` leaves to the server default are not compared.
 fn conflicts(existing: &Op, op: &Op) -> Result<bool> {
-    let (
-        Op::CreateTopic { partitions: p1, message_expiry: e1, max_size: s1, .. },
-        Op::CreateTopic { partitions: p2, message_expiry: e2, max_size: s2, .. },
-    ) = (existing, op)
+    let (Op::CreateTopic { partitions: p1, .. }, Op::CreateTopic { partitions: p2, .. }) = (existing, op)
     else {
         return Ok(false);
     };
-    let expiry = |e: &Option<String>| e.as_deref().map(parse_expiry).transpose();
-    let size = |s: &Option<String>| s.as_deref().map(parse_size).transpose();
-    Ok(p1 != p2
-        || (e2.is_some() && expiry(e1)? != expiry(e2)?)
-        || (s2.is_some() && size(s1)? != size(s2)?))
+    if p1 != p2 {
+        return Ok(true);
+    }
+    for ((name, have), (_, want)) in existing.topic_settings().into_iter().zip(op.topic_settings()) {
+        if let Some(want) = want
+            && !same_setting(name, have, want)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Compares two values of a topic setting by what they parse to, so `7d`
+/// and `7 days` are the same expiry.
+fn same_setting(name: &str, have: Option<&String>, want: &str) -> Result<bool> {
+    let Some(have) = have else { return Ok(false) };
+    Ok(match name {
+        "message_expiry" => parse_expiry(have)? == parse_expiry(want)?,
+        "max_size" => parse_size(have)? == parse_size(want)?,
+        "compression" => parse_compression(have)? == parse_compression(want)?,
+        "segment_size" => parse_segment_size(have)? == parse_segment_size(want)?,
+        "durability" => parse_durability(have)? == parse_durability(want)?,
+        _ => unreachable!("unknown topic setting {name}"),
+    })
 }
 
 /// Renders a baseline file. `per_env` maps each environment to what the
@@ -177,27 +200,18 @@ fn render_op_by_env(ops: &[(&str, &Op)]) -> String {
         _ => None,
     })
     .filter(|p| p != "1");
-    let optional = |f: fn(&Op) -> Option<&String>| {
-        values(&|op| Some(f(op).map_or("None Text".into(), |v| format!("Some {}", text_literal(v)))))
-            .filter(|v| v != "None Text")
-    };
-    let expiry = optional(|op| match op {
-        Op::CreateTopic { message_expiry, .. } => message_expiry.as_ref(),
-        _ => None,
-    });
-    let size = optional(|op| match op {
-        Op::CreateTopic { max_size, .. } => max_size.as_ref(),
-        _ => None,
-    });
     let mut fields = vec![format!("stream = {}", text_literal(stream)), format!("name = {}", text_literal(name))];
     if let Some(p) = partitions {
         fields.push(format!("partitions = {p}"));
     }
-    if let Some(e) = expiry {
-        fields.push(format!("message_expiry = {e}"));
-    }
-    if let Some(s) = size {
-        fields.push(format!("max_size = {s}"));
+    for (i, (setting, _)) in ops[0].1.topic_settings().into_iter().enumerate() {
+        let value = values(&|op| {
+            Some(op.topic_settings()[i].1.map_or("None Text".into(), |v| format!("Some {}", text_literal(v))))
+        })
+        .filter(|v| v != "None Text");
+        if let Some(v) = value {
+            fields.push(format!("{setting} = {v}"));
+        }
     }
     format!("Op.CreateTopic Topic::{{ {} }}", fields.join(", "))
 }
@@ -339,6 +353,9 @@ mod tests {
             partitions,
             message_expiry: None,
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         }
     }
 
@@ -368,6 +385,7 @@ mod tests {
             partitions,
             message_expiry: expiry.map(Into::into),
             max_size: None,
+            compression: None,
         }
     }
 
@@ -401,6 +419,9 @@ mod tests {
             partitions: 1,
             message_expiry: e.map(Into::into),
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         };
         let state = fold(&[stream("a"), with_expiry(Some("7d")), with_expiry(None)]).unwrap();
         assert_eq!(state, vec![stream("a"), with_expiry(Some("7d"))]);
@@ -444,6 +465,9 @@ mod tests {
             partitions,
             message_expiry: expiry.map(Into::into),
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         };
         let mut per_env = BTreeMap::new();
         per_env.insert("dev".to_string(), baseline("sha256:1", vec![stream("a"), topic_with(1, None)]));

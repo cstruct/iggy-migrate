@@ -1,4 +1,5 @@
 mod dhall;
+mod drift;
 mod executor;
 mod ledger;
 mod migrations;
@@ -15,7 +16,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use iggy::prelude::*;
 
-use executor::{Mode, Planned};
+use executor::{Action, Mode, Planned};
+use serde_json::{Value, json};
 
 /// `println!` that ignores write errors, so a closed pipe (`up | head`)
 /// cannot abort a run partway through applying a migration.
@@ -54,16 +56,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show applied, pending and changed migrations.
-    Status,
+    /// Show applied, pending and changed migrations. Exits 1 if any are
+    /// CHANGED, PARTIAL or MISSING.
+    Status {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what `up` would do, without changing anything.
-    Plan,
+    Plan {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Exit 2 instead of 0 when there is something to apply.
+        #[arg(long)]
+        detailed_exitcode: bool,
+    },
     /// Apply all pending migrations, after rehearsing them on a throwaway
     /// copy of the target server in Docker.
     Up {
         /// Apply without rehearsing first.
         #[arg(long)]
         skip_rehearsal: bool,
+        /// Allow pending migrations to delete streams, topics or consumer
+        /// groups, and the messages and offsets in them.
+        #[arg(long, env = "IGGY_MIGRATE_ALLOW_DELETES")]
+        allow_deletes: bool,
+    },
+    /// Compare the server with what the applied migrations created, to find
+    /// resources created, changed or deleted by hand. Exits 1 on drift.
+    Drift {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Replay every migration onto an empty throwaway server in Docker, to
     /// check that the full history applies from scratch. Needs no target server.
@@ -142,7 +167,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             squash::run(&cli.dir, &cli.environments, through.as_deref(), image).await?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Status | Command::Plan | Command::Up { .. } => {}
+        Command::Status { .. } | Command::Plan { .. } | Command::Up { .. } | Command::Drift { .. } => {}
     }
 
     let migrations = migrations::load_dir(&cli.dir, &env)?;
@@ -152,35 +177,45 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let report = Report::new(&migrations, &events, &env)?;
 
     match cli.command {
-        Command::Status => {
-            report.print();
+        Command::Status { json } => {
+            if json {
+                out!("{}", serde_json::to_string_pretty(&report.to_json(&env))?);
+            } else {
+                report.print();
+            }
             Ok(if report.is_clean() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
         }
-        Command::Plan => {
+        Command::Plan { json, detailed_exitcode } => {
             report.ensure_clean()?;
-            let mut planned = Planned::default();
-            for m in report.to_mark() {
-                out!("{}\n  mark applied (all {} replaced migrations are applied)", m.id, m.direct_replaces().count());
-            }
-            for m in report.pending() {
-                out!("{}", m.id);
-                for (i, op) in m.ops.iter().enumerate() {
-                    let action = executor::run(&client, op, Mode::DryRun(&mut planned))
-                        .await
-                        .with_context(|| format!("{}, op {} ({op:?})", m.id, i + 1))?;
-                    out!("  {action:<34} {op:?}");
+            let plan = plan(&client, &report).await?;
+            if json {
+                let mark: Vec<&str> = report.to_mark().map(|m| m.id.as_str()).collect();
+                let doc = json!({ "env": env.name, "mark": mark, "migrations": plan_json(&plan) });
+                out!("{}", serde_json::to_string_pretty(&doc)?);
+            } else {
+                for m in report.to_mark() {
+                    out!("{}\n  mark applied (all {} replaced migrations are applied)", m.id, m.direct_replaces().count());
+                }
+                for (m, actions) in &plan {
+                    out!("{}", m.id);
+                    for (op, action) in m.ops.iter().zip(actions) {
+                        out!("  {:<34} {op:?}", action_label(op, action));
+                    }
+                }
+                if report.is_up_to_date() {
+                    out!("nothing to apply");
                 }
             }
-            if report.is_up_to_date() {
-                out!("nothing to apply");
-            }
-            Ok(ExitCode::SUCCESS)
+            Ok(if detailed_exitcode && !report.is_up_to_date() { ExitCode::from(2) } else { ExitCode::SUCCESS })
         }
-        Command::Up { skip_rehearsal } => {
+        Command::Up { skip_rehearsal, allow_deletes } => {
             report.ensure_clean()?;
             if report.is_up_to_date() {
                 out!("nothing to apply");
                 return Ok(ExitCode::SUCCESS);
+            }
+            if !allow_deletes {
+                ensure_no_deletes(&report)?;
             }
             if !skip_rehearsal && report.pending().next().is_some() {
                 rehearse(&client, &report, cli.rehearsal_image.as_deref()).await?;
@@ -195,10 +230,92 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Drift { json } => {
+            report.ensure_clean()?;
+            let applied = report.applied();
+            let items = drift::detect(&client, &applied).await?;
+            if json {
+                let doc = json!({ "env": env.name, "drift": !items.is_empty(), "items": items });
+                out!("{}", serde_json::to_string_pretty(&doc)?);
+            } else {
+                for i in &items {
+                    let kind = serde_json::to_value(i.kind)?;
+                    let kind = kind.as_str().unwrap_or_default();
+                    match &i.details {
+                        Some(d) => out!("{kind:<10} {} {}: {d}", i.resource, i.key),
+                        None => out!("{kind:<10} {} {}", i.resource, i.key),
+                    }
+                }
+                if items.is_empty() {
+                    out!("no drift: the server matches the {} applied migration(s)", applied.len());
+                }
+            }
+            Ok(if items.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+        }
         Command::New { .. } | Command::Eval { .. } | Command::Verify { .. } | Command::Squash { .. } => {
             unreachable!()
         }
     }
+}
+
+type Plan<'a> = Vec<(&'a Migration, Vec<Action>)>;
+
+/// Dry-runs the pending migrations against the server, in order.
+async fn plan<'a>(client: &IggyClient, report: &Report<'a>) -> Result<Plan<'a>> {
+    let mut planned = Planned::default();
+    let mut plan = Vec::new();
+    for m in report.pending() {
+        let mut actions = Vec::new();
+        for (i, op) in m.ops.iter().enumerate() {
+            let action = executor::run(client, op, Mode::DryRun(&mut planned))
+                .await
+                .with_context(|| format!("{}, op {} ({op:?})", m.id, i + 1))?;
+            actions.push(action);
+        }
+        plan.push((m, actions));
+    }
+    Ok(plan)
+}
+
+fn plan_json(plan: &Plan<'_>) -> Value {
+    plan.iter()
+        .map(|(m, actions)| {
+            let ops: Vec<Value> = m
+                .ops
+                .iter()
+                .zip(actions)
+                .map(|(op, action)| match action {
+                    Action::Apply => json!({ "op": op, "action": "apply", "deletes": op.deletes() }),
+                    Action::Skip(reason) => json!({ "op": op, "action": "skip", "reason": reason }),
+                })
+                .collect();
+            json!({ "id": m.id, "ops": ops })
+        })
+        .collect()
+}
+
+fn action_label(op: &op::Op, action: &Action) -> String {
+    match action {
+        Action::Apply if op.deletes() => "DELETE".into(),
+        _ => action.to_string(),
+    }
+}
+
+/// Refuses to apply deletes unless asked to, since they drop messages and
+/// consumer offsets that no migration can bring back.
+fn ensure_no_deletes(report: &Report<'_>) -> Result<()> {
+    let deletes: Vec<String> = report
+        .pending()
+        .flat_map(|m| m.ops.iter().filter(|op| op.deletes()).map(move |op| format!("  {}: {op:?}", m.id)))
+        .collect();
+    if !deletes.is_empty() {
+        eprintln!("pending migrations delete resources:\n{}", deletes.join("\n"));
+        bail!(
+            "deleting drops their messages and consumer offsets for good; review with `plan`, then \
+             rerun with --allow-deletes (or IGGY_MIGRATE_ALLOW_DELETES=true)"
+        );
+    }
+    Ok(())
 }
 
 /// Applies the pending migrations to a throwaway copy of the target server.
@@ -343,6 +460,16 @@ impl<'a> Report<'a> {
         self.rows.iter().filter(|(_, s)| matches!(s, State::Mark)).map(|(m, _)| *m)
     }
 
+    /// Migrations whose ops this server's state reflects: applied ones, and
+    /// baselines about to be marked because what they replace is applied.
+    fn applied(&self) -> Vec<&'a Migration> {
+        self.rows
+            .iter()
+            .filter(|(_, s)| matches!(s, State::Applied(_) | State::Mark))
+            .map(|(m, _)| *m)
+            .collect()
+    }
+
     fn is_up_to_date(&self) -> bool {
         self.pending().next().is_none() && self.to_mark().next().is_none()
     }
@@ -354,53 +481,105 @@ impl<'a> Report<'a> {
 
     fn ensure_clean(&self) -> Result<()> {
         if !self.is_clean() {
-            self.print();
+            for line in self.lines() {
+                eprintln!("{line}");
+            }
             bail!("refusing to continue until the problems above are fixed");
         }
         Ok(())
     }
 
     fn print(&self) {
+        for line in self.lines() {
+            out!("{line}");
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        macro_rules! push {
+            ($($arg:tt)*) => { lines.push(format!($($arg)*)) };
+        }
         for (m, state) in &self.rows {
             match state {
-                State::Applied(e) => out!("applied   {}  ({} by {})", m.id, e.applied_at, e.runner),
-                State::Pending { out_of_order: false } => out!("pending   {}", m.id),
+                State::Applied(e) => push!("applied   {}  ({} by {})", m.id, e.applied_at, e.runner),
+                State::Pending { out_of_order: false } => push!("pending   {}", m.id),
                 State::Pending { out_of_order: true } => {
-                    out!("pending   {}  (older than the latest applied migration)", m.id)
+                    push!("pending   {}  (older than the latest applied migration)", m.id)
                 }
-                State::Changed(e) => out!(
+                State::Changed(e) => push!(
                     "CHANGED   {}  (applied {} with {}, file now evaluates to {}); restore it and \
                      add a new migration instead",
                     m.id, e.applied_at, e.checksum, m.checksum
                 ),
-                State::Mark => out!(
+                State::Mark => push!(
                     "pending   {}  (baseline; will be marked applied, all {} replaced migrations are applied)",
                     m.id,
                     m.direct_replaces().count()
                 ),
                 State::Partial { not_applied, mismatched } => {
-                    out!("PARTIAL   {}  (baseline, but this server is partway through the migrations it replaces)", m.id);
+                    push!("PARTIAL   {}  (baseline, but this server is partway through the migrations it replaces)", m.id);
                     if !not_applied.is_empty() {
-                        out!("          not applied here: {}", not_applied.join(", "));
+                        push!("          not applied here: {}", not_applied.join(", "));
                     }
                     if !mismatched.is_empty() {
-                        out!("          applied with a different checksum: {}", mismatched.join(", "));
+                        push!("          applied with a different checksum: {}", mismatched.join(", "));
                     }
-                    out!(
+                    push!(
                         "          apply them from the commit before the squash, then run `up` again"
                     );
                 }
             }
         }
         for e in &self.missing {
-            out!(
+            push!(
                 "MISSING   {}  (applied {} but the file is gone); restore it",
                 e.id, e.applied_at
             );
         }
         if self.rows.is_empty() && self.missing.is_empty() {
-            out!("no migrations");
+            push!("no migrations");
         }
+        lines
+    }
+}
+
+impl Report<'_> {
+    fn to_json(&self, env: &dhall::Env) -> Value {
+        let migrations: Vec<Value> = self
+            .rows
+            .iter()
+            .map(|(m, state)| {
+                let mut row = json!({ "id": m.id, "checksum": m.checksum });
+                let fields = match state {
+                    State::Applied(e) => json!({ "state": "applied", "applied_at": e.applied_at, "runner": e.runner }),
+                    State::Pending { out_of_order } => json!({ "state": "pending", "out_of_order": out_of_order }),
+                    State::Changed(e) => json!({
+                        "state": "changed", "applied_at": e.applied_at, "applied_checksum": e.checksum,
+                    }),
+                    State::Mark => json!({ "state": "mark" }),
+                    State::Partial { not_applied, mismatched } => {
+                        json!({ "state": "partial", "not_applied": not_applied, "mismatched": mismatched })
+                    }
+                };
+                if let (Value::Object(row), Value::Object(fields)) = (&mut row, fields) {
+                    row.extend(fields);
+                }
+                row
+            })
+            .collect();
+        let missing: Vec<Value> = self
+            .missing
+            .iter()
+            .map(|e| json!({ "id": e.id, "checksum": e.checksum, "applied_at": e.applied_at }))
+            .collect();
+        json!({
+            "env": env.name,
+            "clean": self.is_clean(),
+            "up_to_date": self.is_up_to_date(),
+            "migrations": migrations,
+            "missing": missing,
+        })
     }
 }
 

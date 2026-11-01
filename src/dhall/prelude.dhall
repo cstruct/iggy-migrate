@@ -5,9 +5,18 @@ let Topic =
           , partitions : Natural
           , message_expiry : Optional Text
           , max_size : Optional Text
+          , compression : Optional Text
+          , segment_size : Optional Text
+          , durability : Optional Text
           }
       , default =
-        { partitions = 1, message_expiry = None Text, max_size = None Text }
+        { partitions = 1
+        , message_expiry = None Text
+        , max_size = None Text
+        , compression = None Text
+        , segment_size = None Text
+        , durability = None Text
+        }
       }
 
 let TopicUpdate =
@@ -17,9 +26,14 @@ let TopicUpdate =
           , partitions : Optional Natural
           , message_expiry : Optional Text
           , max_size : Optional Text
+          , compression : Optional Text
           }
       , default =
-        { partitions = None Natural, message_expiry = None Text, max_size = None Text }
+        { partitions = None Natural
+        , message_expiry = None Text
+        , max_size = None Text
+        , compression = None Text
+        }
       }
 
 let Op =

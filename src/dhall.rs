@@ -176,6 +176,9 @@ mod tests {
                     partitions: 1,
                     message_expiry: None,
                     max_size: None,
+                    compression: None,
+                    segment_size: None,
+                    durability: None,
                 },
             ]
         );
@@ -299,5 +302,17 @@ mod tests {
         let c = eval(r#"[ Op.CreateStream { name = "order" } ]"#, &env()).unwrap();
         assert_eq!(checksum(&a), checksum(&b));
         assert_ne!(checksum(&a), checksum(&c));
+    }
+
+    /// Applied migrations are identified by checksum, so adding a field to an
+    /// op must not change the checksum of a migration that leaves it unset.
+    #[test]
+    fn checksums_of_existing_migrations_are_stable() {
+        let source = include_str!("../migrations/20261101120000_create_orders.dhall");
+        let env = Env { name: "dev".into(), all: vec!["dev".into(), "staging".into(), "prod".into()] };
+        assert_eq!(
+            checksum(&eval(source, &env).unwrap()),
+            "sha256:831f0eeb906b8ba8edab39b6cfb9d67220b65ca974d5a1aa353413e58041eacf"
+        );
     }
 }

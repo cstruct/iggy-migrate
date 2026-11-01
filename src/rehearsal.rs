@@ -141,11 +141,19 @@ pub async fn copy_state(from: &IggyClient, to: &IggyClient) -> Result<usize> {
         count += 1;
         for topic in from.get_topics(&stream_id).await? {
             let topic_id = Identifier::named(&topic.name)?;
+            // `get_topics` omits per-topic options, so read each topic's.
+            let details = from
+                .get_topic(&stream_id, &topic_id)
+                .await?
+                .with_context(|| format!("topic {}/{} disappeared while copying", stream.name, topic.name))?;
+            let runtime = iggy_common::TopicRuntimeOptions::from_resource_options(&details.options);
             let options = TopicCreateOptions {
                 partitions_count: Some(topic.partitions_count),
                 compression_algorithm: Some(topic.compression_algorithm),
                 message_expiry: Some(topic.message_expiry),
                 max_topic_size: Some(topic.max_topic_size),
+                segment_size: Some(runtime.effective_segment_size()),
+                durability: runtime.durability,
                 ..Default::default()
             };
             to.create_topic(&stream_id, &topic.name, &options)
@@ -198,14 +206,19 @@ pub async fn snapshot(client: &IggyClient) -> Result<Vec<String>> {
         lines.push(format!("stream {}", stream.name));
         for topic in client.get_topics(&stream_id).await? {
             let topic_id = Identifier::named(&topic.name)?;
+            let details = client.get_topic(&stream_id, &topic_id).await?.context("topic disappeared")?;
+            let runtime = iggy_common::TopicRuntimeOptions::from_resource_options(&details.options);
             lines.push(format!(
-                "topic {}/{}: partitions {}, expiry {}, max size {}, compression {}",
+                "topic {}/{}: partitions {}, expiry {}, max size {}, compression {}, segment size {}, \
+                 durability {}",
                 stream.name,
                 topic.name,
                 topic.partitions_count,
                 topic.message_expiry,
                 topic.max_topic_size,
-                topic.compression_algorithm
+                topic.compression_algorithm,
+                runtime.effective_segment_size(),
+                runtime.durability,
             ));
             for group in client.get_consumer_groups(&stream_id, &topic_id).await? {
                 lines.push(format!("group {}/{}/{}", stream.name, topic.name, group.name));

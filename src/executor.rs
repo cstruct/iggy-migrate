@@ -158,24 +158,11 @@ async fn check(client: &IggyClient, op: &Op) -> Result<Action> {
             Some(_) => Action::Apply,
             None => Action::Skip("already absent"),
         },
-        Op::CreateTopic { stream, name, partitions, message_expiry, max_size } => {
+        Op::CreateTopic { stream, name, .. } => {
             let Some(existing) = get_topic(client, stream, name).await? else {
                 return Ok(Action::Apply);
             };
-            let mut diffs = Vec::new();
-            if u64::from(existing.partitions_count) != *partitions {
-                diffs.push(format!("partitions {} (want {partitions})", existing.partitions_count));
-            }
-            if let Some(want) = message_expiry
-                && existing.message_expiry != parse_expiry(want)?
-            {
-                diffs.push(format!("message_expiry {} (want {want})", existing.message_expiry));
-            }
-            if let Some(want) = max_size
-                && existing.max_topic_size != parse_size(want)?
-            {
-                diffs.push(format!("max_size {} (want {want})", existing.max_topic_size));
-            }
+            let diffs = topic_diffs(op, &existing)?;
             if !diffs.is_empty() {
                 bail!("topic {stream}/{name} already exists with different config: {}", diffs.join(", "));
             }
@@ -216,11 +203,23 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
             client.create_stream(name).await?;
         }
         Op::DeleteStream { name } => client.delete_stream(&id(name)?).await?,
-        Op::CreateTopic { stream, name, partitions, message_expiry, max_size } => {
+        Op::CreateTopic {
+            stream,
+            name,
+            partitions,
+            message_expiry,
+            max_size,
+            compression,
+            segment_size,
+            durability,
+        } => {
             let options = TopicCreateOptions {
                 partitions_count: Some(u32::try_from(*partitions)?),
                 message_expiry: message_expiry.as_deref().map(parse_expiry).transpose()?,
                 max_topic_size: max_size.as_deref().map(parse_size).transpose()?,
+                compression_algorithm: compression.as_deref().map(parse_compression).transpose()?,
+                segment_size: segment_size.as_deref().map(parse_segment_size).transpose()?,
+                durability: durability.as_deref().map(parse_durability).transpose()?.unwrap_or_default(),
                 ..Default::default()
             };
             client.create_topic(&id(stream)?, name, &options).await.map_err(size_hint)?;
@@ -237,6 +236,7 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
                     }
                     Change::Expiry(e) => options.message_expiry = Some(e),
                     Change::MaxSize(s) => options.max_topic_size = Some(s),
+                    Change::Compression(c) => options.compression_algorithm = Some(c),
                 }
             }
             if options != TopicUpdateOptions::default() {
@@ -261,7 +261,7 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
 /// numbers, so say what the limit actually is.
 fn size_hint(e: IggyError) -> anyhow::Error {
     let hint = e.to_string().contains("segment size").then_some(
-        "max_size must be at least the topic's segment size (1 GiB by default; note 1 GB < 1 GiB)",
+        "max_size must be at least the topic's segment_size (1 GiB unless set; note 1 GB < 1 GiB)",
     );
     match hint {
         Some(hint) => anyhow::Error::new(e).context(hint),
@@ -274,13 +274,67 @@ enum Change {
     Partitions(u32),
     Expiry(IggyExpiry),
     MaxSize(MaxTopicSize),
+    Compression(CompressionAlgorithm),
+}
+
+/// How an existing topic differs from a `CreateTopic`, mirroring how a
+/// create is checked: settings the op leaves to the server default are not
+/// compared.
+pub fn topic_diffs(op: &Op, existing: &TopicDetails) -> Result<Vec<String>> {
+    let Op::CreateTopic {
+        partitions,
+        message_expiry,
+        max_size,
+        compression,
+        segment_size,
+        durability,
+        ..
+    } = op
+    else {
+        unreachable!("only called for CreateTopic");
+    };
+    let runtime = iggy_common::TopicRuntimeOptions::from_resource_options(&existing.options);
+    let mut diffs = Vec::new();
+    let mut diff = |name: &str, differs: bool, have: String, want: &str| {
+        if differs {
+            diffs.push(format!("{name} {have} (want {want})"));
+        }
+    };
+    diff(
+        "partitions",
+        u64::from(existing.partitions_count) != *partitions,
+        existing.partitions_count.to_string(),
+        &partitions.to_string(),
+    );
+    if let Some(want) = message_expiry {
+        let have = existing.message_expiry;
+        diff("message_expiry", have != parse_expiry(want)?, have.to_string(), want);
+    }
+    if let Some(want) = max_size {
+        let have = existing.max_topic_size;
+        diff("max_size", have != parse_size(want)?, have.to_string(), want);
+    }
+    if let Some(want) = compression {
+        let have = existing.compression_algorithm;
+        diff("compression", have != parse_compression(want)?, have.to_string(), want);
+    }
+    if let Some(want) = segment_size {
+        let have = runtime.effective_segment_size();
+        diff("segment_size", have != parse_segment_size(want)?, have.to_string(), want);
+    }
+    if let Some(want) = durability {
+        let have = runtime.durability;
+        diff("durability", have != parse_durability(want)?, have.to_string(), want);
+    }
+    Ok(diffs)
 }
 
 /// What an `UpdateTopic` would change on `existing`; empty when it is
 /// already up to date. Shrinking a topic is an error, since Iggy removes
 /// partitions by deleting them and their messages.
 fn topic_update(op: &Op, existing: &TopicDetails) -> Result<Vec<Change>> {
-    let Op::UpdateTopic { stream, name, partitions, message_expiry, max_size } = op else {
+    let Op::UpdateTopic { stream, name, partitions, message_expiry, max_size, compression } = op
+    else {
         unreachable!("only called for UpdateTopic");
     };
     let mut changes = Vec::new();
@@ -306,6 +360,12 @@ fn topic_update(op: &Op, existing: &TopicDetails) -> Result<Vec<Change>> {
         let want = parse_size(want)?;
         if existing.max_topic_size != want {
             changes.push(Change::MaxSize(want));
+        }
+    }
+    if let Some(want) = compression {
+        let want = parse_compression(want)?;
+        if existing.compression_algorithm != want {
+            changes.push(Change::Compression(want));
         }
     }
     Ok(changes)
@@ -338,6 +398,20 @@ pub fn parse_size(s: &str) -> Result<MaxTopicSize> {
     MaxTopicSize::from_str(s).map_err(|e| anyhow::anyhow!("invalid max_size `{s}`: {e}"))
 }
 
+pub fn parse_compression(s: &str) -> Result<CompressionAlgorithm> {
+    CompressionAlgorithm::from_str(s)
+        .map_err(|e| anyhow::anyhow!("invalid compression `{s}` (use none or gzip): {e}"))
+}
+
+pub fn parse_segment_size(s: &str) -> Result<IggyByteSize> {
+    IggyByteSize::from_str(s).map_err(|e| anyhow::anyhow!("invalid segment_size `{s}`: {e}"))
+}
+
+pub fn parse_durability(s: &str) -> Result<Durability> {
+    Durability::from_str(s)
+        .map_err(|e| anyhow::anyhow!("invalid durability `{s}` (use replicated or persisted): {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +427,9 @@ mod tests {
             partitions: 1,
             message_expiry: None,
             max_size: None,
+            compression: None,
+            segment_size: None,
+            durability: None,
         }
     }
 
@@ -386,5 +463,10 @@ mod tests {
         assert_eq!(parse_size("unlimited").unwrap(), MaxTopicSize::Unlimited);
         assert!(parse_size("10 GB").is_ok());
         assert!(parse_size("big").is_err());
+        assert!(parse_compression("gzip").is_ok());
+        assert!(parse_compression("zstd").is_err());
+        assert!(parse_durability("persisted").is_ok());
+        assert!(parse_durability("eventually").is_err());
+        assert!(parse_segment_size("256 MiB").is_ok());
     }
 }

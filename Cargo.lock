@@ -1667,6 +1667,7 @@ dependencies = [
  "clap",
  "humantime",
  "iggy",
+ "iggy_common",
  "serde",
  "serde_dhall",
  "serde_json",
