@@ -148,6 +148,19 @@ file is limited to 1 MiB of source, 10 million steps, 64 MiB of heap and 5
 seconds. A single built-in call such as `"x" * 10**9` cannot be interrupted
 and may take a few seconds and a lot of memory before a limit stops it.
 
+### Editor support
+
+Generic Starlark tooling doesn't know the functions above, so it flags
+`create_topic` and `env` as undefined. `iggy-migrate lsp` is a language
+server that does: it completes and documents the functions, and shows the
+problems `up` would refuse, at the line they happen, evaluated in every
+environment (`in prod: Key "prod" was not found`). Point your editor's
+Starlark language server at `iggy-migrate lsp`; it takes `--environments`
+like every command.
+
+For Zed, this repository's `.zed/settings.json` runs it in place of starpls
+once `iggy-migrate` is on your PATH (`cargo install --path .`).
+
 ### Topic settings
 
 Keyword arguments of `create_topic`, all optional (`update_topic` takes the

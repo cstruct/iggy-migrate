@@ -1,0 +1,19 @@
+// Starlark in this repo is migrations, which use functions iggy-migrate
+// injects. Run its language server (`cargo install --path .` puts it on PATH)
+// in the extension's buck2-lsp slot, which honours a binary override, instead
+// of starpls, which only knows Bazel's builtins.
+{
+  "languages": {
+    "Starlark": {
+      "language_servers": ["buck2-lsp", "!starpls", "!tilt", "..."]
+    }
+  },
+  "lsp": {
+    "buck2-lsp": {
+      "binary": {
+        "path": "iggy-migrate",
+        "arguments": ["lsp"]
+      }
+    }
+  }
+}

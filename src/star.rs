@@ -14,6 +14,7 @@
 
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use allocative::Allocative;
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, Module};
+use starlark::errors::EvalMessage;
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::starlark_module;
 use starlark::starlark_simple_value;
@@ -65,35 +67,86 @@ pub fn eval_baseline(file: &str, source: &str, env: &Env) -> Result<Baseline> {
     Ok(Baseline { replaces, ops: evaluated.ops })
 }
 
+/// The first problem evaluating `source` in `env`, located in the file when
+/// Starlark knows where it is, for an editor to show. `file` is its path.
+pub fn diagnose(file: &str, source: &str, env: &Env) -> Option<EvalMessage> {
+    let path = Path::new(file);
+    let is_baseline = path.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(migrations::BASELINE_SUFFIX));
+    match eval_with(file, source, env, LIMITS) {
+        Err(Failure::Starlark(e)) => Some(EvalMessage::from_error(path, &e)),
+        Err(Failure::Other(e)) => Some(EvalMessage::from_any_error(path, &format!("{e:#}"))),
+        Ok(evaluated) => match (is_baseline, evaluated.replaces.is_some()) {
+            (false, true) => Some(EvalMessage::from_any_error(
+                path,
+                &"only baselines (`*_baseline.star`) may assign `replaces`",
+            )),
+            (true, false) => Some(EvalMessage::from_any_error(path, &"a baseline must assign `replaces = [...]`")),
+            _ => None,
+        },
+    }
+}
+
 #[derive(Debug)]
 struct Evaluated {
     ops: Vec<Op>,
     replaces: Option<Vec<Replaced>>,
 }
 
-fn eval_with(file: &str, source: &str, env: &Env, limits: Limits) -> Result<Evaluated> {
+/// Why an evaluation failed. Starlark errors keep their location in the
+/// file, for editors.
+#[derive(Debug)]
+enum Failure {
+    Starlark(starlark::Error),
+    Other(anyhow::Error),
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failure::Starlark(e) => write!(f, "{e}"),
+            Failure::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
+impl From<anyhow::Error> for Failure {
+    fn from(e: anyhow::Error) -> Self {
+        Failure::Other(e)
+    }
+}
+
+impl From<starlark::Error> for Failure {
+    fn from(e: starlark::Error) -> Self {
+        Failure::Starlark(e)
+    }
+}
+
+fn eval_with(file: &str, source: &str, env: &Env, limits: Limits) -> Result<Evaluated, Failure> {
     if source.len() > MAX_SOURCE_BYTES {
-        bail!("migration is larger than {} KiB", MAX_SOURCE_BYTES >> 10);
+        Err(anyhow!("migration is larger than {} KiB", MAX_SOURCE_BYTES >> 10))?;
     }
     if !env.all.contains(&env.name) {
-        bail!("unknown environment `{}`; known: {}", env.name, env.all.join(", "));
+        Err(anyhow!("unknown environment `{}`; known: {}", env.name, env.all.join(", ")))?;
     }
     if let Some(bad) = env.all.iter().find(|e| !is_identifier(e)) {
-        bail!("environment `{bad}` must be a valid identifier (letters, digits, _) to use with per_env");
+        Err(anyhow!("environment `{bad}` must be a valid identifier (letters, digits, _) to use with per_env"))?;
     }
     let (file, source, env) = (file.to_string(), source.to_string(), env.clone());
     let worker = thread::Builder::new()
         .name("starlark".into())
         .stack_size(STACK_BYTES)
-        .spawn(move || panic::catch_unwind(AssertUnwindSafe(|| eval_here(&file, source, &env, limits))))?;
+        .spawn(move || panic::catch_unwind(AssertUnwindSafe(|| eval_here(&file, source, &env, limits))))
+        .map_err(anyhow::Error::from)?;
     match worker.join() {
         Ok(Ok(result)) => result,
-        _ => bail!("the Starlark interpreter crashed evaluating this migration (an oversized value?)"),
+        _ => Err(anyhow!("the Starlark interpreter crashed evaluating this migration (an oversized value?)"))?,
     }
 }
 
-fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Evaluated> {
-    let ast = AstModule::parse(file, source, &dialect()).map_err(|e| anyhow!("{e}"))?;
+fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Evaluated, Failure> {
+    let ast = AstModule::parse(file, source, &dialect())?;
     let globals = globals(&env.name);
     let ctx = Ctx { env: env.clone() };
     Module::with_temp_heap(|module| {
@@ -101,14 +154,14 @@ fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Ev
         eval.set_loader(&NoLoads);
         eval.extra = Some(&ctx);
         eval.enable_static_typechecking(true);
-        eval.set_max_tick_count(limits.ticks).map_err(|e| anyhow!("{e}"))?;
-        eval.set_max_heap_size(limits.heap_bytes).map_err(|e| anyhow!("{e}"))?;
+        eval.set_max_tick_count(limits.ticks)?;
+        eval.set_max_heap_size(limits.heap_bytes)?;
         let deadline = Instant::now() + limits.deadline;
         eval.set_check_cancelled(Box::new(move || Instant::now() > deadline));
-        eval.eval_module(ast, &globals).map_err(|e| anyhow!("{e}"))?;
+        eval.eval_module(ast, &globals)?;
         drop(eval);
         if module.get("env").is_some() {
-            bail!("`env` is set by the runner; assigning it is not allowed");
+            Err(anyhow!("`env` is set by the runner; assigning it is not allowed"))?;
         }
         let ops = module.get("ops").ok_or_else(|| anyhow!("the migration must assign `ops = [...]`"))?;
         let replaces = module
@@ -131,13 +184,13 @@ fn is_identifier(s: &str) -> bool {
 
 /// The standard dialect, with type annotations (checked) and keyword-only
 /// arguments. No `while`, no top-level `for`, recursion is depth-limited.
-fn dialect() -> Dialect {
+pub fn dialect() -> Dialect {
     Dialect { enable_types: DialectTypes::Enable, enable_keyword_only_arguments: true, ..Dialect::Standard }
 }
 
 /// The standard library with no extensions (so no `print`, `json` or
 /// `debug`), plus `env` and the native functions.
-fn globals(env: &str) -> Globals {
+pub fn globals(env: &str) -> Globals {
     GlobalsBuilder::standard().with(prelude).with(|b| b.set("env", env)).build()
 }
 
@@ -206,14 +259,19 @@ fn text(value: NoneOr<&str>) -> Option<String> {
 
 #[starlark_module]
 fn prelude(builder: &mut GlobalsBuilder) {
+    /// Creates a stream.
     fn create_stream(#[starlark(require = named)] name: &str) -> anyhow::Result<OpValue> {
         op(Op::CreateStream { name: name.into() })
     }
 
+    /// Deletes a stream with its topics, messages and consumer groups. `up`
+    /// needs `--allow-deletes`.
     fn delete_stream(#[starlark(require = named)] name: &str) -> anyhow::Result<OpValue> {
         op(Op::DeleteStream { name: name.into() })
     }
 
+    /// Creates a topic. Settings left as `None` use the server default; only
+    /// `message_expiry`, `max_size` and `compression` can be changed later.
     // Keyword arguments mirror the op's fields.
     #[allow(clippy::too_many_arguments)]
     fn create_topic(
@@ -238,6 +296,8 @@ fn prelude(builder: &mut GlobalsBuilder) {
         })
     }
 
+    /// Sets the given settings of an existing topic, keeping its messages.
+    /// `partitions` is a target and can only grow.
     fn update_topic(
         #[starlark(require = named)] stream: &str,
         #[starlark(require = named)] name: &str,
@@ -256,6 +316,8 @@ fn prelude(builder: &mut GlobalsBuilder) {
         })
     }
 
+    /// Deletes a topic with its messages and consumer groups. `up` needs
+    /// `--allow-deletes`.
     fn delete_topic(
         #[starlark(require = named)] stream: &str,
         #[starlark(require = named)] name: &str,
@@ -263,6 +325,7 @@ fn prelude(builder: &mut GlobalsBuilder) {
         op(Op::DeleteTopic { stream: stream.into(), name: name.into() })
     }
 
+    /// Creates a consumer group on a topic.
     fn create_consumer_group(
         #[starlark(require = named)] stream: &str,
         #[starlark(require = named)] topic: &str,
@@ -271,6 +334,7 @@ fn prelude(builder: &mut GlobalsBuilder) {
         op(Op::CreateConsumerGroup { stream: stream.into(), topic: topic.into(), name: name.into() })
     }
 
+    /// Deletes a consumer group and its offsets. `up` needs `--allow-deletes`.
     fn delete_consumer_group(
         #[starlark(require = named)] stream: &str,
         #[starlark(require = named)] topic: &str,

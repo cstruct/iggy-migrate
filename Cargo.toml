@@ -18,4 +18,5 @@ sha2 = "0.11.1"
 allocative = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
 starlark = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
 starlark_derive = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
+starlark_lsp = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "time"] }

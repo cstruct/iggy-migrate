@@ -1,6 +1,7 @@
 mod drift;
 mod executor;
 mod ledger;
+mod lsp;
 mod migrations;
 mod op;
 mod rehearsal;
@@ -106,6 +107,8 @@ enum Command {
     },
     /// Create a new, empty migration file.
     New { name: String },
+    /// Run a language server for migration files on stdin/stdout, for editors.
+    Lsp,
     /// Evaluate one migration file and print its ops, without connecting.
     Eval { file: PathBuf },
 }
@@ -141,6 +144,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 out!("{op:?}");
             }
             out!("checksum: {}", migrations::checksum(&ops));
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Lsp => {
+            let environments = cli.environments.clone();
+            tokio::task::spawn_blocking(move || lsp::run(environments)).await??;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Verify { all_envs } => {
@@ -252,7 +260,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(if items.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
         }
-        Command::New { .. } | Command::Eval { .. } | Command::Verify { .. } | Command::Squash { .. } => {
+        Command::New { .. }
+        | Command::Eval { .. }
+        | Command::Lsp
+        | Command::Verify { .. }
+        | Command::Squash { .. } => {
             unreachable!()
         }
     }
