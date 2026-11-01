@@ -1,13 +1,13 @@
-//! Starlark migrations: `.star` files evaluated with starlark-rust, as an
-//! alternative to Dhall with Python-like syntax.
+//! Evaluates `.star` migrations with starlark-rust.
 //!
 //! A migration assigns its ops to a top-level `ops = [...]`, built with the
 //! native functions below (`create_topic(stream = .., name = ..)` and so on),
-//! which are the only way to make an op. The runner injects `env` and
-//! `per_env`. Nothing can be loaded, and the standard library has no access
-//! to files, environment variables, time or randomness.
+//! which are the only way to make an op. A baseline also assigns `replaces`.
+//! The runner injects `env` and `per_env`. Nothing can be loaded, and the
+//! standard library has no access to files, environment variables, time or
+//! randomness.
 //!
-//! Unlike Dhall, Starlark does not guarantee termination, so evaluation runs
+//! Starlark does not guarantee termination, so evaluation runs
 //! under tick, heap and wall-clock limits, on a thread with a large stack
 //! (deeply nested source overflows the parser's stack otherwise) and inside
 //! `catch_unwind` (a few huge allocations panic inside the interpreter).
@@ -31,8 +31,7 @@ use starlark::values::none::NoneOr;
 use starlark::values::{ProvidesStaticType, StarlarkValue, Value, ValueLike};
 use starlark_derive::{StarlarkPagablePanic, starlark_value};
 
-use crate::dhall::Env;
-use crate::migrations;
+use crate::migrations::{self, Baseline, Env, Replaced};
 use crate::op::Op;
 
 const MAX_SOURCE_BYTES: usize = 1 << 20;
@@ -52,15 +51,35 @@ const LIMITS: Limits =
 
 /// Evaluates a migration to its ops. `file` is the name shown in errors.
 pub fn eval(file: &str, source: &str, env: &Env) -> Result<Vec<Op>> {
-    eval_with(file, source, env, LIMITS)
+    let evaluated = eval_with(file, source, env, LIMITS)?;
+    if evaluated.replaces.is_some() {
+        bail!("only baselines (`*_baseline.star`) may assign `replaces`");
+    }
+    Ok(evaluated.ops)
 }
 
-fn eval_with(file: &str, source: &str, env: &Env, limits: Limits) -> Result<Vec<Op>> {
+/// Evaluates a baseline, which assigns `replaces` as well as `ops`.
+pub fn eval_baseline(file: &str, source: &str, env: &Env) -> Result<Baseline> {
+    let evaluated = eval_with(file, source, env, LIMITS)?;
+    let replaces = evaluated.replaces.ok_or_else(|| anyhow!("a baseline must assign `replaces = [...]`"))?;
+    Ok(Baseline { replaces, ops: evaluated.ops })
+}
+
+#[derive(Debug)]
+struct Evaluated {
+    ops: Vec<Op>,
+    replaces: Option<Vec<Replaced>>,
+}
+
+fn eval_with(file: &str, source: &str, env: &Env, limits: Limits) -> Result<Evaluated> {
     if source.len() > MAX_SOURCE_BYTES {
         bail!("migration is larger than {} KiB", MAX_SOURCE_BYTES >> 10);
     }
     if !env.all.contains(&env.name) {
         bail!("unknown environment `{}`; known: {}", env.name, env.all.join(", "));
+    }
+    if let Some(bad) = env.all.iter().find(|e| !is_identifier(e)) {
+        bail!("environment `{bad}` must be a valid identifier (letters, digits, _) to use with per_env");
     }
     let (file, source, env) = (file.to_string(), source.to_string(), env.clone());
     let worker = thread::Builder::new()
@@ -73,7 +92,7 @@ fn eval_with(file: &str, source: &str, env: &Env, limits: Limits) -> Result<Vec<
     }
 }
 
-fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Vec<Op>> {
+fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Evaluated> {
     let ast = AstModule::parse(file, source, &dialect()).map_err(|e| anyhow!("{e}"))?;
     let globals = globals(&env.name);
     let ctx = Ctx { env: env.clone() };
@@ -92,8 +111,22 @@ fn eval_here(file: &str, source: String, env: &Env, limits: Limits) -> Result<Ve
             bail!("`env` is set by the runner; assigning it is not allowed");
         }
         let ops = module.get("ops").ok_or_else(|| anyhow!("the migration must assign `ops = [...]`"))?;
-        ops_from_value(ops)
+        let replaces = module
+            .get("replaces")
+            .map(|v| {
+                let json = v.to_json_value().map_err(|e| anyhow!("`replaces`: {e}"))?;
+                serde_json::from_value(json).map_err(|e| {
+                    anyhow!("`replaces` must be a list of {{\"id\", \"checksum\", \"parent\"}} dicts: {e}")
+                })
+            })
+            .transpose()?;
+        Ok(Evaluated { ops: ops_from_value(ops)?, replaces })
     })
+}
+
+fn is_identifier(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The standard dialect, with type annotations (checked) and keyword-only
@@ -247,8 +280,8 @@ fn prelude(builder: &mut GlobalsBuilder) {
     }
 
     /// The value for the current environment. Every known environment must
-    /// be given, and no others, so a missing one fails in every environment
-    /// (like Dhall's `merge`), not just when that environment is migrated.
+    /// be given, and no others, so a missing one fails in every environment,
+    /// not just when that environment is migrated.
     fn per_env<'v>(
         #[starlark(kwargs)] values: DictRef<'v>,
         eval: &mut Evaluator<'v, '_, '_>,
@@ -274,7 +307,7 @@ fn prelude(builder: &mut GlobalsBuilder) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dhall;
+    use crate::migrations::checksum;
 
     fn env(name: &str) -> Env {
         Env { name: name.into(), all: vec!["dev".into(), "staging".into(), "prod".into()] }
@@ -311,20 +344,20 @@ ops = [create_stream(name = "orders")] + [
         assert_eq!(eval_ok(ORDERS, "prod").len(), 5);
     }
 
-    /// The same ops in Dhall and Starlark have the same checksum, so a
-    /// migration can be rewritten in the other format once applied.
+    /// Ledgers written while migrations were Dhall record checksums of the
+    /// evaluated ops; the Starlark rewrite of a migration must match them.
+    /// Adding fields to ops must not change them either.
     #[test]
-    fn checksums_match_dhall() {
-        let dhall_source = r#"
-let topic = \(name : Text) -> Op.CreateTopic Topic::{ stream = "orders", name, partitions = merge { dev = 1, staging = 3, prod = 12 } env.kind, message_expiry = Some "7d" }
-in  [ Op.CreateStream { name = "orders" } ]
-  # map Text Op topic [ "created", "paid", "shipped" ]
-  # [ Op.CreateConsumerGroup { stream = "orders", topic = "paid", name = "billing" } ]
-"#;
-        for name in ["dev", "prod"] {
-            let from_dhall = dhall::eval(dhall_source, &env(name)).unwrap();
-            assert_eq!(dhall::checksum(&eval_ok(ORDERS, name)), dhall::checksum(&from_dhall));
-        }
+    fn checksums_match_the_dhall_era() {
+        let source = include_str!("../migrations/20261101120000_create_orders.star");
+        assert_eq!(
+            checksum(&eval("m.star", source, &env("dev")).unwrap()),
+            "sha256:831f0eeb906b8ba8edab39b6cfb9d67220b65ca974d5a1aa353413e58041eacf"
+        );
+        assert_eq!(
+            checksum(&eval("m.star", source, &env("prod")).unwrap()),
+            "sha256:5dbe9490c2e8545b04363457c4bfe75ecccaadc2a637979fd770bcbede8c6bf1"
+        );
     }
 
     #[test]
@@ -379,6 +412,7 @@ in  [ Op.CreateStream { name = "orders" } ]
         assert!(err(r#"ops = [{"CreateStream": {"name": "s"}}]"#).contains("ops[0] must be an op"));
         assert!(err("ops = ()").contains("must be a list"));
         assert!(err("env = \"prod\"\nops = []").contains("`env` is set by the runner"));
+        assert!(err("replaces = []\nops = []").contains("only baselines"));
     }
 
     #[test]
@@ -387,9 +421,9 @@ in  [ Op.CreateStream { name = "orders" } ]
 names = {n: None for n in ["b", "a", "c"]}
 ops = [create_stream(name = n) for n in names] + [create_stream(name = str(0.1 + 0.2))]
 "#;
-        let first = dhall::checksum(&eval_ok(source, "dev"));
+        let first = checksum(&eval_ok(source, "dev"));
         for _ in 0..10 {
-            assert_eq!(dhall::checksum(&eval_ok(source, "dev")), first);
+            assert_eq!(checksum(&eval_ok(source, "dev")), first);
         }
     }
 }

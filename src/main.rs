@@ -1,4 +1,3 @@
-mod dhall;
 mod drift;
 mod executor;
 mod ledger;
@@ -44,7 +43,7 @@ struct Cli {
     /// Environment being migrated, exposed to migrations as `env`.
     #[arg(long, env = "IGGY_MIGRATE_ENV", default_value = "dev", global = true)]
     env: String,
-    /// Every known environment, so migrations can `merge` over all of them.
+    /// Every known environment, so `per_env` can require all of them.
     #[arg(long, env = "IGGY_MIGRATE_ENVIRONMENTS", default_value = "dev,staging,prod", value_delimiter = ',', global = true)]
     environments: Vec<String>,
     /// Docker image for rehearsal servers. Defaults to the target server's
@@ -106,12 +105,7 @@ enum Command {
         through: Option<String>,
     },
     /// Create a new, empty migration file.
-    New {
-        name: String,
-        /// File format of the new migration.
-        #[arg(long, value_enum, default_value = "dhall")]
-        format: migrations::Format,
-    },
+    New { name: String },
     /// Evaluate one migration file and print its ops, without connecting.
     Eval { file: PathBuf },
 }
@@ -134,10 +128,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
-    let env = dhall::Env { name: cli.env.clone(), all: cli.environments.clone() };
+    let env = migrations::Env { name: cli.env.clone(), all: cli.environments.clone() };
     match &cli.command {
-        Command::New { name, format } => {
-            let path = migrations::create(&cli.dir, name, *format)?;
+        Command::New { name } => {
+            let path = migrations::create(&cli.dir, name)?;
             out!("created {}", path.display());
             return Ok(ExitCode::SUCCESS);
         }
@@ -146,7 +140,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             for op in &ops {
                 out!("{op:?}");
             }
-            out!("checksum: {}", dhall::checksum(&ops));
+            out!("checksum: {}", migrations::checksum(&ops));
             return Ok(ExitCode::SUCCESS);
         }
         Command::Verify { all_envs } => {
@@ -154,7 +148,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let image = cli.rehearsal_image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
             let server = rehearsal::Server::start(image).await?;
             for name in envs {
-                let env = dhall::Env { name: name.clone(), all: cli.environments.clone() };
+                let env = migrations::Env { name: name.clone(), all: cli.environments.clone() };
                 let migrations = migrations::load_dir(&cli.dir, &env)?;
                 server.reset().await?;
                 let all: Vec<&Migration> = migrations.iter().collect();
@@ -349,7 +343,7 @@ async fn rehearse(client: &IggyClient, report: &Report<'_>, image: Option<&str>)
     Ok(())
 }
 
-async fn apply(client: &IggyClient, m: &Migration, env: &dhall::Env) -> Result<()> {
+async fn apply(client: &IggyClient, m: &Migration, env: &migrations::Env) -> Result<()> {
     out!("{}", m.id);
     let started = Instant::now();
     let mut result = Ok(());
@@ -371,12 +365,12 @@ async fn apply(client: &IggyClient, m: &Migration, env: &dhall::Env) -> Result<(
 }
 
 /// Records a baseline as applied without running it.
-async fn mark(client: &IggyClient, m: &Migration, env: &dhall::Env) -> Result<()> {
+async fn mark(client: &IggyClient, m: &Migration, env: &migrations::Env) -> Result<()> {
     out!("{}\n  marked applied (all {} replaced migrations are applied)", m.id, m.direct_replaces().count());
     ledger::append(client, &event(m, env, Status::Baselined, Vec::new(), Instant::now())).await
 }
 
-fn event(m: &Migration, env: &dhall::Env, status: Status, ops: Vec<op::Op>, started: Instant) -> Event {
+fn event(m: &Migration, env: &migrations::Env, status: Status, ops: Vec<op::Op>, started: Instant) -> Event {
     Event {
         id: m.id.clone(),
         status,
@@ -413,7 +407,7 @@ struct Report<'a> {
 }
 
 impl<'a> Report<'a> {
-    fn new(migrations: &'a [Migration], events: &'a [Event], env: &dhall::Env) -> Result<Self> {
+    fn new(migrations: &'a [Migration], events: &'a [Event], env: &migrations::Env) -> Result<Self> {
         let mut applied: HashMap<&str, &Event> = HashMap::new();
         for e in events.iter().filter(|e| matches!(e.status, Status::Applied | Status::Baselined)) {
             if e.env != env.name {
@@ -551,7 +545,7 @@ impl<'a> Report<'a> {
 }
 
 impl Report<'_> {
-    fn to_json(&self, env: &dhall::Env) -> Value {
+    fn to_json(&self, env: &migrations::Env) -> Value {
         let migrations: Vec<Value> = self
             .rows
             .iter()

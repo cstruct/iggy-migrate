@@ -1,7 +1,7 @@
 //! Discovers, evaluates and validates migration files.
 //!
-//! Files are named `<YYYYMMDDHHMMSS>_<name>.dhall` or `.star` and applied
-//! in timestamp order; both formats can be mixed in one directory. Every file is evaluated and validated before anything is applied,
+//! Files are named `<YYYYMMDDHHMMSS>_<name>.star` and applied in timestamp
+//! order. Every file is evaluated and validated before anything is applied,
 //! so a mistake in any of them stops the run before the server is touched.
 
 use std::fs;
@@ -10,10 +10,28 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_dhall::StaticType;
 
 use crate::op::Op;
-use crate::{dhall, executor, ledger, star};
+use crate::{executor, ledger, star};
+
+/// Values the runner exposes to migrations as `env`.
+#[derive(Debug, Clone)]
+pub struct Env {
+    /// The environment being migrated; must be one of `all`.
+    pub name: String,
+    /// Every known environment, so `per_env` can require all of them.
+    pub all: Vec<String>,
+}
+
+/// Hash of the evaluated ops, used as the migration checksum. Formatting or
+/// refactoring a file leaves it unchanged; changing what it does changes it.
+pub fn checksum<T: Serialize + ?Sized>(value: &T) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(value).expect("migration serializes to JSON");
+    let digest = Sha256::digest(&json);
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
+}
 
 pub struct Migration {
     pub id: String,
@@ -41,17 +59,19 @@ impl Migration {
 ///
 /// When a baseline is itself squashed, the migrations it replaced are carried
 /// along with `parent` naming it, so servers that applied the originals but
-/// never the intermediate baseline are still recognised. (Dhall has no
-/// recursive types, hence a flat list rather than a tree.)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, StaticType)]
+/// never the intermediate baseline are still recognised. It is a flat list,
+/// as it was when baselines were Dhall (which has no recursive types), so
+/// baselines rewritten from Dhall keep their checksums.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Replaced {
     pub id: String,
     pub checksum: String,
     pub parent: Option<String>,
 }
 
-/// What a `*_baseline.dhall` file evaluates to.
-#[derive(Debug, Deserialize, StaticType)]
+/// What a `*_baseline.star` file evaluates to.
+#[derive(Debug)]
 pub struct Baseline {
     pub replaces: Vec<Replaced>,
     pub ops: Vec<Op>,
@@ -59,42 +79,21 @@ pub struct Baseline {
 
 pub const BASELINE_SUFFIX: &str = "_baseline";
 
-/// A migration file format, chosen by extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Format {
-    Dhall,
-    Star,
-}
-
-impl Format {
-    pub fn of(path: &Path) -> Option<Format> {
-        match path.extension()?.to_str()? {
-            "dhall" => Some(Format::Dhall),
-            "star" => Some(Format::Star),
-            _ => None,
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Format::Dhall => "dhall",
-            Format::Star => "star",
-        }
-    }
-}
-
-pub fn load_dir(dir: &Path, env: &dhall::Env) -> Result<Vec<Migration>> {
+pub fn load_dir(dir: &Path, env: &Env) -> Result<Vec<Migration>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
-        if Format::of(&path).is_some() {
-            paths.push(path);
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("star") => paths.push(path),
+            Some("dhall") => bail!(
+                "{}: Dhall migrations are no longer supported. Rewrite it as a .star file with \
+                 the same ops; the checksum stays the same, so it stays applied",
+                path.display()
+            ),
+            _ => {}
         }
     }
-    paths.sort_by(|a, b| a.file_stem().cmp(&b.file_stem()));
-    if let Some(pair) = paths.windows(2).find(|w| w[0].file_stem() == w[1].file_stem()) {
-        bail!("{} and {} have the same id; delete one", pair[0].display(), pair[1].display());
-    }
+    paths.sort();
 
     let mut migrations = Vec::new();
     let mut errors = Vec::new();
@@ -110,45 +109,36 @@ pub fn load_dir(dir: &Path, env: &dhall::Env) -> Result<Vec<Migration>> {
     Ok(migrations)
 }
 
-fn load(path: &Path, env: &dhall::Env) -> Result<Migration> {
+fn load(path: &Path, env: &Env) -> Result<Migration> {
     let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
     validate_id(&id)?;
     let source = fs::read_to_string(path)?;
-    let format = Format::of(path).expect("load_dir only passes known formats");
-    let (ops, replaces) = if format == Format::Star {
-        if id.ends_with(BASELINE_SUFFIX) {
-            bail!("baselines are generated by `squash` as .dhall files");
-        }
-        (star::eval(&file_name(path), &source, env)?, Vec::new())
-    } else if id.ends_with(BASELINE_SUFFIX) {
-        let baseline: Baseline = dhall::eval_as(&source, env)?;
+    let file = file_name(path);
+    let (ops, replaces) = if id.ends_with(BASELINE_SUFFIX) {
+        let baseline = star::eval_baseline(&file, &source, env)?;
         if baseline.replaces.is_empty() {
             bail!("a baseline must replace at least one migration");
         }
         (baseline.ops, baseline.replaces)
     } else {
-        (dhall::eval(&source, env)?, Vec::new())
+        (star::eval(&file, &source, env)?, Vec::new())
     };
     for (i, op) in ops.iter().enumerate() {
         validate(op).with_context(|| format!("op {} ({op:?})", i + 1))?;
     }
     validate_updates(&ops)?;
     let checksum = if replaces.is_empty() {
-        dhall::checksum(&ops)
+        checksum(&ops)
     } else {
-        dhall::checksum(&(&replaces, &ops))
+        checksum(&(&replaces, &ops))
     };
     Ok(Migration { id, path: path.to_path_buf(), ops, checksum, replaces })
 }
 
 /// Evaluates one migration file (not a baseline) to its ops.
-pub fn eval_file(path: &Path, env: &dhall::Env) -> Result<Vec<Op>> {
+pub fn eval_file(path: &Path, env: &Env) -> Result<Vec<Op>> {
     let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    match Format::of(path) {
-        Some(Format::Dhall) => Ok(dhall::eval(&source, env)?),
-        Some(Format::Star) => star::eval(&file_name(path), &source, env),
-        None => bail!("{} is not a .dhall or .star file", path.display()),
-    }
+    star::eval(&file_name(path), &source, env)
 }
 
 fn file_name(path: &Path) -> String {
@@ -163,7 +153,7 @@ fn validate_id(id: &str) -> Result<()> {
             && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
     });
     if !valid {
-        bail!("file name must be <YYYYMMDDHHMMSS>_<snake_case_name>.dhall (or .star)");
+        bail!("file name must be <YYYYMMDDHHMMSS>_<snake_case_name>.star");
     }
     Ok(())
 }
@@ -261,37 +251,21 @@ fn validate_updates(ops: &[Op]) -> Result<()> {
     Ok(())
 }
 
-pub fn create(dir: &Path, name: &str, format: Format) -> Result<PathBuf> {
+pub fn create(dir: &Path, name: &str) -> Result<PathBuf> {
     let now = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
     let ts: String = now.chars().filter(char::is_ascii_digit).collect();
     let id = format!("{ts}_{name}");
     validate_id(&id).context("invalid migration name")?;
     fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{id}.{}", format.extension()));
+    let path = dir.join(format!("{id}.star"));
     if path.exists() {
         bail!("{} already exists", path.display());
     }
-    let template = match format {
-        Format::Dhall => TEMPLATE,
-        Format::Star => STAR_TEMPLATE,
-    };
-    fs::write(&path, template)?;
+    fs::write(&path, TEMPLATE)?;
     Ok(path)
 }
 
-const TEMPLATE: &str = r#"-- Ops available: Op.CreateStream, Op.DeleteStream, Op.CreateTopic,
--- Op.DeleteTopic, Op.CreateConsumerGroup, Op.DeleteConsumerGroup.
--- Topic::{ stream, name } gives a topic with defaults; `env.kind` is the
--- environment being migrated, for use with `merge`.
---
--- [ Op.CreateStream { name = "orders" }
--- , Op.CreateTopic Topic::{ stream = "orders", name = "events", partitions = 3 }
--- ]
-
-[] : List Op
-"#;
-
-const STAR_TEMPLATE: &str = r#"# Ops: create_stream, delete_stream, create_topic, update_topic, delete_topic,
+const TEMPLATE: &str = r#"# Ops: create_stream, delete_stream, create_topic, update_topic, delete_topic,
 # create_consumer_group, delete_consumer_group (keyword arguments only).
 # `env` is the environment being migrated; per_env(dev = 1, staging = 3,
 # prod = 12) picks a value for it and requires every environment.
@@ -370,8 +344,7 @@ mod tests {
 
     #[test]
     fn template_evaluates() {
-        let env = dhall::Env { name: "dev".into(), all: vec!["dev".into()] };
-        assert_eq!(dhall::eval(TEMPLATE, &env).unwrap(), vec![]);
-        assert_eq!(star::eval("t.star", STAR_TEMPLATE, &env).unwrap(), vec![]);
+        let env = Env { name: "dev".into(), all: vec!["dev".into()] };
+        assert_eq!(star::eval("t.star", TEMPLATE, &env).unwrap(), vec![]);
     }
 }

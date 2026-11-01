@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
-use serde_dhall::StaticType;
 
-/// A single operation a migration can perform. Every migration format
-/// (Dhall today, possibly a line format later) evaluates to a `Vec<Op>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, StaticType)]
+/// A single operation a migration can perform. Every migration evaluates to
+/// a `Vec<Op>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     CreateStream {
         name: String,

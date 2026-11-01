@@ -2,11 +2,10 @@
 
 Forward-only migrations for Apache Iggy streams, topics and consumer groups.
 
-Migrations are [Starlark](https://github.com/bazelbuild/starlark) or
-[Dhall](https://dhall-lang.org) files that evaluate to a list of ops. Both
-are evaluated in a sandbox, so they cannot read files, URLs or environment
-variables, and every pending migration is evaluated and validated before
-anything is applied.
+Migrations are [Starlark](https://github.com/bazelbuild/starlark) files that
+evaluate to a list of ops. They are evaluated in a sandbox, so they cannot
+read files, URLs or environment variables, and every pending migration is
+evaluated and validated before anything is applied.
 
 Applied migrations are recorded as JSON events in Iggy itself, on the
 `migration/migration` topic (one partition, never expires, unlimited size),
@@ -15,8 +14,7 @@ which the tool creates on first `up`.
 ## Usage
 
 ```bash
-iggy-migrate new create_orders   # migrations/20261101120000_create_orders.dhall
-iggy-migrate new add_payments --format star   # ….star
+iggy-migrate new create_orders   # migrations/20261101120000_create_orders.star
 iggy-migrate status              # applied / pending / CHANGED / MISSING
 iggy-migrate plan                # what `up` would do, without changing anything
 iggy-migrate up                  # rehearse, then apply pending migrations
@@ -93,9 +91,8 @@ picture; a failed migration's partial work shows up as drift.
 ## Squashing (baselines)
 
 `squash [--through <id>]` replaces every migration up to and including `<id>`
-(all of them by default) with one `<timestamp>_baseline.dhall` that creates
-their final state, and deletes the replaced files. Baselines are always
-Dhall, whatever format the replaced migrations were in. For each environment it
+(all of them by default) with one `<timestamp>_baseline.star` that creates
+their final state, and deletes the replaced files. For each environment it
 folds the history (deletes drop what they remove, recreated resources keep
 their last config), then proves in Docker that the history and the baseline
 produce identical streams, topics and groups before writing anything.
@@ -115,14 +112,6 @@ baseline carries the old one's replaced migrations along, so servers that are
 several squashes behind are still recognised. Don't edit generated baselines.
 
 ## Writing migrations
-
-Migrations are written in Dhall (`.dhall`) or Starlark (`.star`); both can
-be mixed in one directory, and `iggy-migrate new <name> --format star`
-starts a Starlark one. A migration's checksum is computed from the ops it
-evaluates to, not its source, so rewriting an applied migration in the
-other format keeps it applied as long as it produces the same ops.
-
-### Starlark
 
 ```python
 ops = [create_stream(name = "orders")] + [
@@ -154,47 +143,15 @@ loops must be inside a `def` or written as comprehensions. Type annotations
 are checked. Mistakes are reported at the call in your file, e.g.
 ``Found `partitons` extra named parameter(s) for call to create_topic``.
 
-Unlike Dhall, Starlark does not guarantee that evaluation finishes, so each
+Starlark does not guarantee that evaluation finishes, so each
 file is limited to 1 MiB of source, 10 million steps, 64 MiB of heap and 5
 seconds. A single built-in call such as `"x" * 10**9` cannot be interrupted
 and may take a few seconds and a lot of memory before a limit stops it.
 
-### Dhall
-
-```dhall
-let topic =
-      \(name : Text) ->
-        Op.CreateTopic
-          Topic::{
-          , stream = "orders"
-          , name
-          , partitions = merge { dev = 1, staging = 3, prod = 12 } env.kind
-          , message_expiry = Some "7d"
-          }
-
-in  [ Op.CreateStream { name = "orders" } ]
-  # map Text Op topic [ "created", "paid", "shipped" ]
-```
-
-Dhall migrations evaluate to a list of ops, with imports disabled so they
-cannot read files, URLs or environment variables, and evaluation always
-finishes. Available in every file:
-
-- `Op`: `CreateStream`, `DeleteStream`, `CreateTopic`, `UpdateTopic`,
-  `DeleteTopic`, `CreateConsumerGroup`, `DeleteConsumerGroup`.
-- `Topic::{ stream, name }`: a topic with defaults (`partitions = 1`, server
-  default expiry and max size).
-- `TopicUpdate::{ stream, name }`: an update that changes nothing until you
-  set `partitions`, `message_expiry`, `max_size` or `compression` (see
-  below).
-- `map`, `concat`: list helpers (the Dhall Prelude is not available).
-- `env.name : Text` and `env.kind : Env`, a union of `--environments`. Dhall
-  cannot compare `Text`, so branch on `env.kind` with `merge`; leaving out an
-  environment is a type error.
-
 ### Topic settings
 
-All optional except `partitions`:
+Keyword arguments of `create_topic`, all optional (`update_topic` takes the
+updatable ones):
 
 | Field | Values | Default | Updatable |
 | --- | --- | --- | --- |
@@ -218,26 +175,14 @@ ops = [update_topic(stream = "orders", name = "events",
                     message_expiry = "14d")]
 ```
 
-```dhall
-[ Op.UpdateTopic
-    TopicUpdate::{
-    , stream = "orders"
-    , name = "events"
-    , partitions = Some (merge { dev = 2, staging = 6, prod = 24 } env.kind)
-    , message_expiry = Some "14d"
-    }
-]
-```
-
-`UpdateTopic` changes a topic in place, keeping its messages. Fields are
-targets, not deltas: `partitions = Some 24` adds partitions until there are
-24, and an update that already holds is skipped. Partitions can only grow,
+`update_topic` changes a topic in place, keeping its messages. Settings are
+targets, not deltas: `partitions = 24` adds partitions until there are 24, and an update that already holds is skipped. Partitions can only grow,
 because Iggy removes partitions by deleting them and their messages; to
 shrink, delete and recreate the topic. `max_size` must be at least the
 `segment_size` (1 GiB by default; `"1 GB"` is smaller than that).
 
 Each topic may be created or updated once per migration, so a migration that
-failed halfway can be rerun; put all changes to a topic in one op.
+failed halfway can be rerun; put all changes to a topic in one call.
 
 Adding partitions changes which partition a key hashes to, so per-key
 ordering does not hold across the change.
@@ -286,3 +231,13 @@ docker run -d --name iggy --security-opt seccomp=unconfined -p 8090:8090 \
 
 The server needs io_uring (hence `seccomp=unconfined`) and cannot pin cores
 under Docker Desktop. Built against `iggy` SDK 0.11.0 / server 0.9.0.
+
+## Moving from Dhall
+
+Dhall migrations are no longer supported, and `.dhall` files in the
+migrations directory are an error. Checksums are computed from the ops a file
+evaluates to, not its source, so rewrite each one as a `.star` file with the
+same id that produces the same ops in every environment; it stays applied.
+Check with `status` (a mistake shows as CHANGED), or compare `eval` output
+against the checksums in the ledger. Generated baselines can be rewritten the
+same way, with `replaces` as a list of `{"id", "checksum", "parent"}` dicts.

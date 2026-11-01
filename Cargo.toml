@@ -10,7 +10,6 @@ humantime = "2.4.0"
 iggy = "=0.11.0"
 iggy_common = "=0.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_dhall = "0.13.0"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 # starlark 0.14.2 on crates.io pins blake3 =1.8.2, which conflicts with
