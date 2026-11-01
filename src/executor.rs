@@ -53,7 +53,7 @@ impl Planned {
 
     fn record(&mut self, op: &Op) {
         let key = key(op);
-        if matches!(op, Op::CreateStream { .. } | Op::CreateTopic { .. } | Op::CreateConsumerGroup { .. }) {
+        if creates(op) {
             self.deleted.retain(|k| k != &key && !ancestors(k).any(|a| a == key));
             self.created.insert(key);
         } else {
@@ -88,8 +88,23 @@ fn id(name: &str) -> Result<Identifier> {
 }
 
 pub async fn run(client: &IggyClient, op: &Op, mode: Mode<'_>) -> Result<Action> {
+    let key = key(op);
+    if let Some(parent) = ancestors(&key).last() {
+        let planned = match &mode {
+            Mode::DryRun(planned) => planned.exists(&parent),
+            Mode::Apply => None,
+        };
+        let exists = match planned {
+            Some(exists) => exists,
+            None => resource_exists(client, &parent).await?,
+        };
+        if !exists && creates(op) {
+            let kind = if parent.contains('/') { "topic" } else { "stream" };
+            bail!("cannot create {key}: {kind} {parent} does not exist");
+        }
+    }
     let planned = match &mode {
-        Mode::DryRun(planned) => planned.exists(&key(op)),
+        Mode::DryRun(planned) => planned.exists(&key),
         Mode::Apply => None,
     };
     let action = match planned {
@@ -104,9 +119,20 @@ pub async fn run(client: &IggyClient, op: &Op, mode: Mode<'_>) -> Result<Action>
     Ok(action)
 }
 
+fn creates(op: &Op) -> bool {
+    matches!(op, Op::CreateStream { .. } | Op::CreateTopic { .. } | Op::CreateConsumerGroup { .. })
+}
+
+/// Whether the stream (`s`) or topic (`s/t`) named by `key` exists.
+async fn resource_exists(client: &IggyClient, key: &str) -> Result<bool> {
+    Ok(match key.split_once('/') {
+        None => client.get_stream(&id(key)?).await?.is_some(),
+        Some((stream, topic)) => get_topic(client, stream, topic).await?.is_some(),
+    })
+}
+
 fn planned_action(op: &Op, exists: bool) -> Action {
-    let creates = matches!(op, Op::CreateStream { .. } | Op::CreateTopic { .. } | Op::CreateConsumerGroup { .. });
-    match (creates, exists) {
+    match (creates(op), exists) {
         (true, false) | (false, true) => Action::Apply,
         (true, true) => Action::Skip("created earlier in this run"),
         (false, false) => Action::Skip("deleted earlier in this run"),

@@ -3,13 +3,14 @@ mod executor;
 mod ledger;
 mod migrations;
 mod op;
+mod rehearsal;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use iggy::prelude::*;
 
@@ -32,6 +33,10 @@ struct Cli {
     /// Every known environment, so migrations can `merge` over all of them.
     #[arg(long, env = "IGGY_MIGRATE_ENVIRONMENTS", default_value = "dev,staging,prod", value_delimiter = ',', global = true)]
     environments: Vec<String>,
+    /// Docker image for rehearsal servers. Defaults to the target server's
+    /// version for `up`, and to the version this tool is built for otherwise.
+    #[arg(long, env = "IGGY_MIGRATE_REHEARSAL_IMAGE", global = true)]
+    rehearsal_image: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -42,8 +47,20 @@ enum Command {
     Status,
     /// Show what `up` would do, without changing anything.
     Plan,
-    /// Apply all pending migrations.
-    Up,
+    /// Apply all pending migrations, after rehearsing them on a throwaway
+    /// copy of the target server in Docker.
+    Up {
+        /// Apply without rehearsing first.
+        #[arg(long)]
+        skip_rehearsal: bool,
+    },
+    /// Replay every migration onto an empty throwaway server in Docker, to
+    /// check that the full history applies from scratch. Needs no target server.
+    Verify {
+        /// Verify every environment in --environments, not just --env.
+        #[arg(long)]
+        all_envs: bool,
+    },
     /// Create a new, empty migration file.
     New { name: String },
     /// Evaluate one migration file and print its ops, without connecting.
@@ -52,7 +69,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse()).await {
+    // On Ctrl-C the `run` future is dropped, which removes any rehearsal
+    // container it started.
+    let result = tokio::select! {
+        result = run(Cli::parse()) => result,
+        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+    };
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -77,7 +100,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             println!("checksum: {}", dhall::checksum(&ops));
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Status | Command::Plan | Command::Up => {}
+        Command::Verify { all_envs } => {
+            let envs = if *all_envs { cli.environments.clone() } else { vec![cli.env.clone()] };
+            let image = cli.rehearsal_image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
+            let server = rehearsal::Server::start(image).await?;
+            for name in envs {
+                let env = dhall::Env { name: name.clone(), all: cli.environments.clone() };
+                let migrations = migrations::load_dir(&cli.dir, &env)?;
+                server.reset().await?;
+                let all: Vec<&Migration> = migrations.iter().collect();
+                let s = rehearsal::apply(&server.client, &all)
+                    .await
+                    .with_context(|| format!("env {name}: history does not apply from scratch"))?;
+                println!(
+                    "env {name}: {} migration(s) apply from scratch ({} op(s) applied, {} skipped)",
+                    s.migrations, s.applied, s.skipped
+                );
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Status | Command::Plan | Command::Up { .. } => {}
     }
 
     let migrations = migrations::load_dir(&cli.dir, &env)?;
@@ -96,8 +138,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let mut planned = Planned::default();
             for m in report.pending() {
                 println!("{}", m.id);
-                for op in &m.ops {
-                    let action = executor::run(&client, op, Mode::DryRun(&mut planned)).await?;
+                for (i, op) in m.ops.iter().enumerate() {
+                    let action = executor::run(&client, op, Mode::DryRun(&mut planned))
+                        .await
+                        .with_context(|| format!("{}, op {} ({op:?})", m.id, i + 1))?;
                     println!("  {action:<34} {op:?}");
                 }
             }
@@ -106,11 +150,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Up => {
+        Command::Up { skip_rehearsal } => {
             report.ensure_clean()?;
             if report.pending().next().is_none() {
                 println!("nothing to apply");
                 return Ok(ExitCode::SUCCESS);
+            }
+            if !skip_rehearsal {
+                rehearse(&client, &report, cli.rehearsal_image.as_deref()).await?;
             }
             ledger::ensure(&client).await?;
             for m in report.pending() {
@@ -118,8 +165,33 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::New { .. } | Command::Eval { .. } => unreachable!(),
+        Command::New { .. } | Command::Eval { .. } | Command::Verify { .. } => unreachable!(),
     }
+}
+
+/// Applies the pending migrations to a throwaway copy of the target server.
+async fn rehearse(client: &IggyClient, report: &Report<'_>, image: Option<&str>) -> Result<()> {
+    let version = rehearsal::server_version(client).await?;
+    let image = image.map_or_else(|| format!("apache/iggy:{version}"), str::to_string);
+    let server = rehearsal::Server::start(&image).await?;
+    if server.version != version {
+        eprintln!(
+            "warning: rehearsal server runs {} but the target runs {version}",
+            server.version
+        );
+    }
+    let copied = rehearsal::copy_state(client, &server.client)
+        .await
+        .context("copying the target's streams, topics and groups to the rehearsal server")?;
+    let pending: Vec<&Migration> = report.pending().collect();
+    let s = rehearsal::apply(&server.client, &pending)
+        .await
+        .context("rehearsal failed, nothing was applied to the target")?;
+    println!(
+        "rehearsal passed on a copy of {copied} resource(s): {} migration(s), {} op(s) applied, {} skipped\n",
+        s.migrations, s.applied, s.skipped
+    );
+    Ok(())
 }
 
 async fn apply(client: &IggyClient, m: &Migration, env: &dhall::Env) -> Result<()> {

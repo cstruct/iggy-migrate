@@ -17,7 +17,8 @@ which the tool creates on first `up`.
 iggy-migrate new create_orders   # migrations/20261101120000_create_orders.dhall
 iggy-migrate status              # applied / pending / CHANGED / MISSING
 iggy-migrate plan                # what `up` would do, without changing anything
-iggy-migrate up                  # apply pending migrations
+iggy-migrate up                  # rehearse, then apply pending migrations
+iggy-migrate verify --all-envs   # replay all migrations on an empty server
 iggy-migrate eval <file>         # print a file's ops, without connecting
 ```
 
@@ -27,6 +28,25 @@ iggy-migrate eval <file>         # print a file's ops, without connecting
 | `--dir`          | `IGGY_MIGRATE_DIR`          | `migrations`                      |
 | `--env`          | `IGGY_MIGRATE_ENV`          | `dev`                             |
 | `--environments` | `IGGY_MIGRATE_ENVIRONMENTS` | `dev,staging,prod`                |
+| `--rehearsal-image` | `IGGY_MIGRATE_REHEARSAL_IMAGE` | target's version (`up`), `apache/iggy:0.9.0` (`verify`) |
+
+## Rehearsals (requires Docker)
+
+`up` first applies the pending migrations to a throwaway Iggy server in
+Docker, running the same version as the target, after copying the target's
+current streams, topics and consumer groups into it. Only if that succeeds is
+anything applied to the target. This catches what `plan` cannot: the server's
+own validation, version-specific behaviour, and bugs in this tool. Use
+`--skip-rehearsal` to apply without Docker.
+
+`verify` replays the whole history onto an empty server, without connecting to
+a target. It checks that an environment can be built from migrations alone, so
+it fails for migrations that depend on resources created by hand; run it in CI.
+
+Rehearsals copy metadata, not messages, and cannot catch differences in server
+config (values left to the server default), permissions or capacity.
+Containers are labelled `iggy-migrate=rehearsal` and removed afterwards,
+including on Ctrl-C.
 
 ## Writing migrations
 
@@ -71,6 +91,8 @@ Available in every file:
 Not handled: concurrent runners. Run `up` from one place (e.g. a single CI job).
 
 ## Local server
+
+The same settings the rehearsal containers use:
 
 ```bash
 docker run -d --name iggy --security-opt seccomp=unconfined -p 8090:8090 \
