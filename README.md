@@ -2,10 +2,11 @@
 
 Forward-only migrations for Apache Iggy streams, topics and consumer groups.
 
-Migrations are [Dhall](https://dhall-lang.org) files that evaluate to a list of
-ops. They are evaluated with imports disabled, so they cannot read files, URLs
-or environment variables, and every pending migration is evaluated and
-validated before anything is applied.
+Migrations are [Starlark](https://github.com/bazelbuild/starlark) or
+[Dhall](https://dhall-lang.org) files that evaluate to a list of ops. Both
+are evaluated in a sandbox, so they cannot read files, URLs or environment
+variables, and every pending migration is evaluated and validated before
+anything is applied.
 
 Applied migrations are recorded as JSON events in Iggy itself, on the
 `migration/migration` topic (one partition, never expires, unlimited size),
@@ -15,6 +16,7 @@ which the tool creates on first `up`.
 
 ```bash
 iggy-migrate new create_orders   # migrations/20261101120000_create_orders.dhall
+iggy-migrate new add_payments --format star   # ….star
 iggy-migrate status              # applied / pending / CHANGED / MISSING
 iggy-migrate plan                # what `up` would do, without changing anything
 iggy-migrate up                  # rehearse, then apply pending migrations
@@ -92,7 +94,8 @@ picture; a failed migration's partial work shows up as drift.
 
 `squash [--through <id>]` replaces every migration up to and including `<id>`
 (all of them by default) with one `<timestamp>_baseline.dhall` that creates
-their final state, and deletes the replaced files. For each environment it
+their final state, and deletes the replaced files. Baselines are always
+Dhall, whatever format the replaced migrations were in. For each environment it
 folds the history (deletes drop what they remove, recreated resources keep
 their last config), then proves in Docker that the history and the baseline
 produce identical streams, topics and groups before writing anything.
@@ -113,6 +116,51 @@ several squashes behind are still recognised. Don't edit generated baselines.
 
 ## Writing migrations
 
+Migrations are written in Dhall (`.dhall`) or Starlark (`.star`); both can
+be mixed in one directory, and `iggy-migrate new <name> --format star`
+starts a Starlark one. A migration's checksum is computed from the ops it
+evaluates to, not its source, so rewriting an applied migration in the
+other format keeps it applied as long as it produces the same ops.
+
+### Starlark
+
+```python
+ops = [create_stream(name = "orders")] + [
+    create_topic(
+        stream = "orders",
+        name = name,
+        partitions = per_env(dev = 1, staging = 3, prod = 12),
+        message_expiry = "7d",
+    )
+    for name in ["created", "paid", "shipped"]
+] + [create_consumer_group(stream = "orders", topic = "paid", name = "billing")]
+```
+
+A file assigns its ops to `ops`. Available in every file:
+
+- `create_stream`, `delete_stream`, `create_topic`, `update_topic`,
+  `delete_topic`, `create_consumer_group`, `delete_consumer_group`. They
+  take keyword arguments only, named like the settings below, and are the
+  only way to make an op.
+- `env`: the environment being migrated, as a string.
+- `per_env(dev = .., staging = .., prod = ..)`: the value for `env`. Every
+  environment in `--environments` must be given, so a missing one is an
+  error in all of them, not just when that environment is migrated.
+
+Files run in a sandbox: `load` is refused and the standard library has no
+access to files, environment variables, time or randomness (and no
+`print`). Starlark has no `while` and limits recursion depth, and `for`
+loops must be inside a `def` or written as comprehensions. Type annotations
+are checked. Mistakes are reported at the call in your file, e.g.
+``Found `partitons` extra named parameter(s) for call to create_topic``.
+
+Unlike Dhall, Starlark does not guarantee that evaluation finishes, so each
+file is limited to 1 MiB of source, 10 million steps, 64 MiB of heap and 5
+seconds. A single built-in call such as `"x" * 10**9` cannot be interrupted
+and may take a few seconds and a lot of memory before a limit stops it.
+
+### Dhall
+
 ```dhall
 let topic =
       \(name : Text) ->
@@ -128,7 +176,9 @@ in  [ Op.CreateStream { name = "orders" } ]
   # map Text Op topic [ "created", "paid", "shipped" ]
 ```
 
-Available in every file:
+Dhall migrations evaluate to a list of ops, with imports disabled so they
+cannot read files, URLs or environment variables, and evaluation always
+finishes. Available in every file:
 
 - `Op`: `CreateStream`, `DeleteStream`, `CreateTopic`, `UpdateTopic`,
   `DeleteTopic`, `CreateConsumerGroup`, `DeleteConsumerGroup`.
@@ -137,8 +187,14 @@ Available in every file:
 - `TopicUpdate::{ stream, name }`: an update that changes nothing until you
   set `partitions`, `message_expiry`, `max_size` or `compression` (see
   below).
+- `map`, `concat`: list helpers (the Dhall Prelude is not available).
+- `env.name : Text` and `env.kind : Env`, a union of `--environments`. Dhall
+  cannot compare `Text`, so branch on `env.kind` with `merge`; leaving out an
+  environment is a type error.
 
-`Topic` settings, all optional except `partitions`:
+### Topic settings
+
+All optional except `partitions`:
 
 | Field | Values | Default | Updatable |
 | --- | --- | --- | --- |
@@ -153,12 +209,14 @@ Iggy only allows changing expiry, max size and compression after creation,
 so changing `segment_size` or `durability` means recreating the topic.
 `compression` is recorded on the topic, but Iggy 0.9 does not compress
 payloads yet.
-- `map`, `concat`: list helpers (the Dhall Prelude is not available).
-- `env.name : Text` and `env.kind : Env`, a union of `--environments`. Dhall
-  cannot compare `Text`, so branch on `env.kind` with `merge`; leaving out an
-  environment is a type error.
 
 ### Updating topics
+
+```python
+ops = [update_topic(stream = "orders", name = "events",
+                    partitions = per_env(dev = 2, staging = 6, prod = 24),
+                    message_expiry = "14d")]
+```
 
 ```dhall
 [ Op.UpdateTopic

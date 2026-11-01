@@ -13,4 +13,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_dhall = "0.13.0"
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+# starlark 0.14.2 on crates.io pins blake3 =1.8.2, which conflicts with
+# iggy_common's ^1.8.7. This upstream commit (2026-08-07) relaxes the pin;
+# switch back to crates.io once a release includes it.
+allocative = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
+starlark = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
+starlark_derive = { git = "https://github.com/facebook/starlark-rust", rev = "3bed1c40f93da22b8e251dd520dfb8d35bfe1fb7" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "time"] }

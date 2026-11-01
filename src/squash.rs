@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -314,6 +314,7 @@ pub async fn run(dir: &Path, environments: &[String], through: Option<&str>, ima
         server.reset().await?;
         let migration = Migration {
             id: id.clone(),
+            path: PathBuf::new(),
             ops: baseline.ops.clone(),
             checksum: String::new(),
             replaces: baseline.replaces.clone(),
@@ -331,8 +332,12 @@ pub async fn run(dir: &Path, environments: &[String], through: Option<&str>, ima
 
     let path = dir.join(format!("{id}.dhall"));
     fs::write(&path, &source)?;
-    for old in squashed {
-        fs::remove_file(dir.join(format!("{old}.dhall")))?;
+    // Paths from loading, since the replaced files may be .dhall or .star.
+    let first = loaded.values().next().expect("at least one environment");
+    for old in &first[..end] {
+        fs::remove_file(&old.path).with_context(|| {
+            format!("removing {} after writing {}; remove it by hand", old.path.display(), path.display())
+        })?;
     }
     crate::out!("squashed {} migration(s) into {}", squashed.len(), path.display());
     Ok(())
@@ -482,6 +487,7 @@ mod tests {
     #[test]
     fn squashing_a_baseline_carries_its_replaces_along() {
         let m = |id: &str, replaces: Vec<Replaced>| Migration {
+            path: PathBuf::new(),
             id: id.into(),
             ops: vec![],
             checksum: format!("c-{id}"),

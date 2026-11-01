@@ -6,6 +6,7 @@ mod migrations;
 mod op;
 mod rehearsal;
 mod squash;
+mod star;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -105,7 +106,12 @@ enum Command {
         through: Option<String>,
     },
     /// Create a new, empty migration file.
-    New { name: String },
+    New {
+        name: String,
+        /// File format of the new migration.
+        #[arg(long, value_enum, default_value = "dhall")]
+        format: migrations::Format,
+    },
     /// Evaluate one migration file and print its ops, without connecting.
     Eval { file: PathBuf },
 }
@@ -130,13 +136,13 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<ExitCode> {
     let env = dhall::Env { name: cli.env.clone(), all: cli.environments.clone() };
     match &cli.command {
-        Command::New { name } => {
-            let path = migrations::create(&cli.dir, name)?;
+        Command::New { name, format } => {
+            let path = migrations::create(&cli.dir, name, *format)?;
             out!("created {}", path.display());
             return Ok(ExitCode::SUCCESS);
         }
         Command::Eval { file } => {
-            let ops = dhall::eval(&std::fs::read_to_string(file)?, &env)?;
+            let ops = migrations::eval_file(file, &env)?;
             for op in &ops {
                 out!("{op:?}");
             }
