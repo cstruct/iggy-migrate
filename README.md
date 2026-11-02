@@ -7,9 +7,10 @@ evaluate to a list of ops. They are evaluated in a sandbox, so they cannot
 read files, URLs or environment variables, and every pending migration is
 evaluated and validated before anything is applied.
 
-Applied migrations are recorded as JSON events in Iggy itself, on the
-`migration/migration` topic (one partition, never expires, unlimited size),
-which the tool creates on first `up`.
+Applied migrations are recorded as JSON events in a ledger: by default in
+Iggy itself, on the `migration/migration` topic (one partition, never
+expires, unlimited size), or in a Postgres table, which also gives `up` a
+lock against concurrent runners.
 
 ## Usage
 
@@ -24,14 +25,63 @@ iggy-migrate squash              # replace all migrations with one baseline
 iggy-migrate eval <file>         # print a file's ops, without connecting
 ```
 
-| Flag             | Env var                     | Default                           |
-| ---------------- | --------------------------- | --------------------------------- |
-| `--url`          | `IGGY_MIGRATE_URL`          | `iggy://iggy:iggy@localhost:8090` |
-| `--dir`          | `IGGY_MIGRATE_DIR`          | `migrations`                      |
-| `--env`          | `IGGY_MIGRATE_ENV`          | `dev`                             |
-| `--environments` | `IGGY_MIGRATE_ENVIRONMENTS` | `dev,staging,prod`                |
-| `--rehearsal-image` | `IGGY_MIGRATE_REHEARSAL_IMAGE` | target's version (`up`), `apache/iggy:0.9.0` (`verify`) |
-| `--allow-deletes` (`up`) | `IGGY_MIGRATE_ALLOW_DELETES` | off |
+## Configuration
+
+Settings come from, later ones winning:
+
+1. `iggy-migrate.styx` in the working directory, or `--config <file>`
+2. `iggy-migrate.secrets.styx` next to it, or `--secrets <file>`: the only
+   place passwords and tokens may be set
+3. environment variables `IGGY_MIGRATE__<PATH>`, with `__` between levels:
+   `IGGY_MIGRATE__ENV=prod`, `IGGY_MIGRATE__LEDGER__NAMESPACE=prod-eu`
+4. flags: `--url` (`iggy.url`), `--dir`, `--env`, `--environments`,
+   `--rehearsal-image` (`rehearsal.image`), `--allow-deletes` on `up`
+
+```styx
+// iggy-migrate.styx
+env prod
+environments "dev,staging,prod"
+iggy {
+  url "iggy://migrate@iggy.internal:8090"
+}
+ledger {
+  type postgres
+  url "postgres://migrate@db.internal/ops?sslmode=require"
+}
+```
+
+```styx
+// iggy-migrate.secrets.styx (keep out of version control)
+iggy {
+  password hunter2
+}
+ledger {
+  password s3cret
+}
+```
+
+| Setting | Default | |
+| --- | --- | --- |
+| `dir` | `migrations` | directory of migration files |
+| `env` | `dev` | environment being migrated, `env` in migrations |
+| `environments` | `dev,staging,prod` | comma separated; `per_env` requires all of them |
+| `runner` | `$USER` | recorded in the ledger as who applied each migration |
+| `allow_deletes` | `false` | let `up` apply deletes |
+| `iggy.url` | `iggy://iggy@localhost:8090` | connection string without the password |
+| `iggy.password` | | secret: the password for the user in `iggy.url` |
+| `iggy.token` | | secret: a personal access token instead (`iggy://host:port`) |
+| `ledger.type` | `iggy` | `iggy` or `postgres` |
+| `ledger.url` | | Postgres connection string without the password |
+| `ledger.password` | | secret |
+| `ledger.namespace` | `env` | separates servers sharing one table |
+| `ledger.table` | `iggy_migrate_events` | |
+| `ledger.lock_timeout` | `10m` | how long `up` waits for another runner |
+| `rehearsal.image` | target's version (`up`), `apache/iggy:0.9.0` (`verify`) | |
+
+Unknown settings, secrets set anywhere but the secrets file, and old
+`IGGY_MIGRATE_*` variables are errors. In CI, write the secrets file from
+your secret store before running the tool. Iggy connection strings cannot
+escape `:` or `@`, so passwords containing them are refused.
 
 ### Deletes
 
@@ -52,6 +102,28 @@ and is not guarded.
 `status`, `plan` and `drift` take `--json` for machine-readable output on
 stdout; errors and refusals still go to stderr as text.
 
+## Postgres ledger
+
+```styx
+ledger {
+  type postgres
+  url "postgres://migrate@db.internal/ops?sslmode=require"
+}
+```
+
+Events are stored as JSON in one table (`ledger.table`, created on first
+`up`), one row per event, keyed by `ledger.namespace`, which defaults to
+`env`. Give servers that share a database and an environment name their own
+namespace. TLS uses the system's root certificates; `sslmode` in the URL
+picks `disable`, `prefer` (the default) or `require`.
+
+To move a server from the Iggy ledger, configure Postgres and run
+`iggy-migrate ledger import` once: it copies the Iggy ledger's events into
+the empty namespace, under the lock. Until then, `status` and `up` refuse a
+server whose Iggy ledger has history but whose namespace is empty, rather
+than treating it as new. The Iggy ledger is left in place; delete the
+`migration` stream once `status` looks right.
+
 ## Rehearsals (requires Docker)
 
 `up` first applies the pending migrations to a throwaway Iggy server in
@@ -68,7 +140,7 @@ it fails for migrations that depend on resources created by hand; run it in CI.
 Rehearsals copy metadata, not messages, and cannot catch differences in server
 config (values left to the server default), permissions or capacity.
 Containers are labelled `iggy-migrate=rehearsal` and removed afterwards,
-including on Ctrl-C.
+including on Ctrl-C (but not when the process is killed with `kill -9`).
 
 ## Drift
 
@@ -214,11 +286,18 @@ ordering does not hold across the change.
 
 ### Concurrent runners
 
-There is no lock: Iggy has nothing to build one on that a crashed runner
-could not leave held. Run `up` from one place per server, e.g. one CI job
-with a concurrency group (`concurrency:` in GitHub Actions).
+With the Postgres ledger, `up` holds a session-level advisory lock on its
+namespace from before it reads the ledger until it exits. Other runners wait,
+saying who holds it (`waiting for iggy-migrate (ci-4) from 10.0.0.7, …`), for
+up to `ledger.lock_timeout`, then read the ledger fresh, so they apply only
+what is left. The lock belongs to the database connection, so a runner that
+crashes or is killed releases it at once. `status`, `plan` and `drift` don't
+take it.
 
-If two runners do overlap on the same migrations, both see them pending and
+With the Iggy ledger there is no lock: Iggy has nothing to build one on that a
+crashed runner could not leave held. Run `up` from one place per server, e.g.
+one CI job with a concurrency group (`concurrency:` in GitHub Actions). If two
+runners do overlap on the same migrations, both see them pending and
 start applying. Per op, one runner's check passes and creates the resource;
 the other's create then fails with "already exists", so it stops and records
 a failed event, which `status` ignores. Running `up` again reports nothing to

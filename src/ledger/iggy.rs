@@ -1,48 +1,17 @@
-//! The ledger: an append-only record of migration runs, stored in Iggy itself
-//! as JSON messages on a single-partition topic that never expires.
+//! The Iggy ledger: events stored as JSON messages on the server itself, on a
+//! single-partition topic that never expires.
 
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
 use iggy::prelude::*;
-use serde::{Deserialize, Serialize};
-
-use crate::op::Op;
+use super::Event;
 
 pub const STREAM: &str = "migration";
 pub const TOPIC: &str = "migration";
 const PARTITION: u32 = 0;
 const CONSUMER: &str = "iggy-migrate";
 const BATCH: u32 = 100;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    Applied,
-    Failed,
-    /// A baseline marked applied without running it, because every migration
-    /// it replaces had already been applied.
-    Baselined,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Event {
-    pub id: String,
-    pub status: Status,
-    pub checksum: String,
-    pub env: String,
-    /// The evaluated ops, so the ledger shows what actually ran.
-    pub ops: Vec<Op>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// For a baseline, the ids of the migrations it replaces.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub replaces: Vec<String>,
-    pub applied_at: String,
-    pub duration_ms: u64,
-    pub runner: String,
-    pub tool_version: String,
-}
 
 fn stream_id() -> Identifier {
     Identifier::named(STREAM).expect("valid stream name")

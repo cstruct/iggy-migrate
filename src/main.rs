@@ -1,3 +1,4 @@
+mod config;
 mod drift;
 mod executor;
 mod ledger;
@@ -29,30 +30,56 @@ macro_rules! out {
     }};
 }
 pub(crate) use out;
-use ledger::{Event, Status};
+use ledger::{Event, Ledger, Status};
 use migrations::{Migration, Replaced};
 
 #[derive(Parser)]
 #[command(version, about = "Forward-only migrations for Iggy streams, topics and consumer groups")]
 struct Cli {
-    /// Iggy connection string.
-    #[arg(long, env = "IGGY_MIGRATE_URL", default_value = "iggy://iggy:iggy@localhost:8090", global = true, hide_env_values = true)]
-    url: String,
-    /// Directory containing migration files.
-    #[arg(long, env = "IGGY_MIGRATE_DIR", default_value = "migrations", global = true)]
-    dir: PathBuf,
-    /// Environment being migrated, exposed to migrations as `env`.
-    #[arg(long, env = "IGGY_MIGRATE_ENV", default_value = "dev", global = true)]
-    env: String,
-    /// Every known environment, so `per_env` can require all of them.
-    #[arg(long, env = "IGGY_MIGRATE_ENVIRONMENTS", default_value = "dev,staging,prod", value_delimiter = ',', global = true)]
-    environments: Vec<String>,
-    /// Docker image for rehearsal servers. Defaults to the target server's
-    /// version for `up`, and to the version this tool is built for otherwise.
-    #[arg(long, env = "IGGY_MIGRATE_REHEARSAL_IMAGE", global = true)]
+    /// Config file (default: iggy-migrate.styx, if it exists).
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    /// Secrets file, the only place for passwords and tokens (default: the
+    /// config file's name with `.secrets.styx`, if it exists).
+    #[arg(long, global = true)]
+    secrets: Option<PathBuf>,
+    /// Iggy connection string without the password (`iggy.url`).
+    #[arg(long, global = true)]
+    url: Option<String>,
+    /// Directory containing migration files (`dir`).
+    #[arg(long, global = true)]
+    dir: Option<String>,
+    /// Environment being migrated, exposed to migrations as `env` (`env`).
+    #[arg(long, global = true)]
+    env: Option<String>,
+    /// Every known environment, comma separated (`environments`).
+    #[arg(long, global = true)]
+    environments: Option<String>,
+    /// Docker image for rehearsal servers (`rehearsal.image`).
+    #[arg(long, global = true)]
     rehearsal_image: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    fn flags(&self) -> config::Flags {
+        let mut values = Vec::new();
+        let mut set = |path, value: &Option<String>| {
+            if let Some(v) = value {
+                values.push((path, v.clone()));
+            }
+        };
+        set("iggy.url", &self.url);
+        set("dir", &self.dir);
+        set("env", &self.env);
+        set("environments", &self.environments);
+        set("rehearsal.image", &self.rehearsal_image);
+        if let Command::Up { allow_deletes: true, .. } = self.command {
+            values.push(("allow_deletes", "true".into()));
+        }
+        config::Flags { config: self.config.clone(), secrets: self.secrets.clone(), values }
+    }
 }
 
 #[derive(Subcommand)]
@@ -80,8 +107,8 @@ enum Command {
         #[arg(long)]
         skip_rehearsal: bool,
         /// Allow pending migrations to delete streams, topics or consumer
-        /// groups, and the messages and offsets in them.
-        #[arg(long, env = "IGGY_MIGRATE_ALLOW_DELETES")]
+        /// groups, and the messages and offsets in them (`allow_deletes`).
+        #[arg(long)]
         allow_deletes: bool,
     },
     /// Compare the server with what the applied migrations created, to find
@@ -111,6 +138,16 @@ enum Command {
     Lsp,
     /// Evaluate one migration file and print its ops, without connecting.
     Eval { file: PathBuf },
+    /// Manage the ledger.
+    #[command(subcommand)]
+    Ledger(LedgerCommand),
+}
+
+#[derive(Subcommand)]
+enum LedgerCommand {
+    /// Copy the events of this server's Iggy ledger into the configured
+    /// Postgres ledger, once, when switching to Postgres.
+    Import,
 }
 
 #[tokio::main]
@@ -131,10 +168,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
-    let env = migrations::Env { name: cli.env.clone(), all: cli.environments.clone() };
+    let config = config::load(cli.flags())?;
+    let environments = config.environments();
+    let dir = config.dir();
+    let env = migrations::Env { name: config.env.clone(), all: environments.clone() };
     match &cli.command {
         Command::New { name } => {
-            let path = migrations::create(&cli.dir, name)?;
+            let path = migrations::create(&dir, name)?;
             out!("created {}", path.display());
             return Ok(ExitCode::SUCCESS);
         }
@@ -147,17 +187,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::Lsp => {
-            let environments = cli.environments.clone();
             tokio::task::spawn_blocking(move || lsp::run(environments)).await??;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Verify { all_envs } => {
-            let envs = if *all_envs { cli.environments.clone() } else { vec![cli.env.clone()] };
-            let image = cli.rehearsal_image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
+            let envs = if *all_envs { environments.clone() } else { vec![config.env.clone()] };
+            let image = config.rehearsal.image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
             let server = rehearsal::Server::start(image).await?;
             for name in envs {
-                let env = migrations::Env { name: name.clone(), all: cli.environments.clone() };
-                let migrations = migrations::load_dir(&cli.dir, &env)?;
+                let env = migrations::Env { name: name.clone(), all: environments.clone() };
+                let migrations = migrations::load_dir(&dir, &env)?;
                 server.reset().await?;
                 let all: Vec<&Migration> = migrations.iter().collect();
                 let s = rehearsal::apply(&server.client, &all)
@@ -171,18 +210,34 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::Squash { through } => {
-            let image = cli.rehearsal_image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
-            squash::run(&cli.dir, &cli.environments, through.as_deref(), image).await?;
+            let image = config.rehearsal.image.as_deref().unwrap_or(rehearsal::DEFAULT_IMAGE);
+            squash::run(&dir, &environments, through.as_deref(), image).await?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Status { .. } | Command::Plan { .. } | Command::Up { .. } | Command::Drift { .. } => {}
+        Command::Status { .. }
+        | Command::Plan { .. }
+        | Command::Up { .. }
+        | Command::Drift { .. }
+        | Command::Ledger(_) => {}
     }
 
-    let migrations = migrations::load_dir(&cli.dir, &env)?;
-    let client = IggyClient::from_connection_string(&cli.url)?;
-    client.connect().await?;
-    let events = ledger::read(&client).await?;
+    let client = IggyClient::from_connection_string(&config.iggy_connection_string()?)?;
+    client.connect().await.context("connecting to Iggy")?;
+    let ledger = open_ledger(&config, &client).await?;
+    if let Command::Ledger(LedgerCommand::Import) = cli.command {
+        return import(&client, &ledger).await;
+    }
+    let migrations = migrations::load_dir(&dir, &env)?;
+    if let Command::Up { .. } = cli.command {
+        // Before reading, so a runner that waited sees what the other applied.
+        ledger.lock().await?;
+    }
+    let events = ledger.read().await?;
+    if events.is_empty() && matches!(ledger, Ledger::Postgres(_)) {
+        ensure_nothing_to_import(&client).await?;
+    }
     let report = Report::new(&migrations, &events, &env)?;
+    let runner = config.runner();
 
     match cli.command {
         Command::Status { json } => {
@@ -216,23 +271,23 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(if detailed_exitcode && !report.is_up_to_date() { ExitCode::from(2) } else { ExitCode::SUCCESS })
         }
-        Command::Up { skip_rehearsal, allow_deletes } => {
+        Command::Up { skip_rehearsal, .. } => {
             report.ensure_clean()?;
             if report.is_up_to_date() {
                 out!("nothing to apply");
                 return Ok(ExitCode::SUCCESS);
             }
-            if !allow_deletes {
+            if !config.allow_deletes {
                 ensure_no_deletes(&report)?;
             }
             if !skip_rehearsal && report.pending().next().is_some() {
-                rehearse(&client, &report, cli.rehearsal_image.as_deref()).await?;
+                rehearse(&client, &report, config.rehearsal.image.as_deref()).await?;
             }
-            ledger::ensure(&client).await?;
+            ledger.ensure().await?;
             for (m, state) in &report.rows {
                 match state {
-                    State::Pending { .. } => apply(&client, m, &env).await?,
-                    State::Mark => mark(&client, m, &env).await?,
+                    State::Pending { .. } => apply(&client, &ledger, m, &env, &runner).await?,
+                    State::Mark => mark(&ledger, m, &env, &runner).await?,
                     _ => {}
                 }
             }
@@ -264,10 +319,72 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         | Command::Eval { .. }
         | Command::Lsp
         | Command::Verify { .. }
-        | Command::Squash { .. } => {
+        | Command::Squash { .. }
+        | Command::Ledger(_) => {
             unreachable!()
         }
     }
+}
+
+async fn open_ledger<'a>(config: &config::Config, client: &'a IggyClient) -> Result<Ledger<'a>> {
+    Ok(match &config.ledger {
+        config::Ledger::Iggy => Ledger::Iggy(client),
+        config::Ledger::Postgres { url, password, namespace, table, lock_timeout } => {
+            let runner = config.runner();
+            Ledger::Postgres(Box::new(
+                ledger::postgres::Ledger::connect(ledger::postgres::Options {
+                    url,
+                    password: password.as_deref(),
+                    namespace: namespace.as_deref().unwrap_or(&config.env),
+                    table,
+                    lock_timeout: config::parse_duration("ledger.lock_timeout", lock_timeout)?,
+                    runner: &runner,
+                })
+                .await?,
+            ))
+        }
+    })
+}
+
+/// With a Postgres ledger that has nothing for this namespace yet, refuses a
+/// server whose Iggy ledger has history, which would otherwise look new.
+async fn ensure_nothing_to_import(client: &IggyClient) -> Result<()> {
+    let events = ledger::iggy::read(client).await?;
+    if !events.is_empty() {
+        bail!(
+            "the Postgres ledger has no events for this server, but its Iggy ledger has {}; \
+             copy them over with `iggy-migrate ledger import` first",
+            events.len()
+        );
+    }
+    Ok(())
+}
+
+/// Copies the Iggy ledger into an empty Postgres namespace, under the lock.
+async fn import(client: &IggyClient, ledger: &Ledger<'_>) -> Result<ExitCode> {
+    let Ledger::Postgres(postgres) = ledger else {
+        bail!("`ledger import` copies into a Postgres ledger; set `ledger {{ type postgres ... }}` first");
+    };
+    ledger.lock().await?;
+    if !ledger.read().await?.is_empty() {
+        bail!("ledger namespace `{}` already has events; refusing to import into it", postgres.namespace());
+    }
+    let events = ledger::iggy::read(client).await?;
+    if events.is_empty() {
+        bail!("this server has no Iggy ledger events to import");
+    }
+    ledger.ensure().await?;
+    for event in &events {
+        ledger.append(event).await?;
+    }
+    out!(
+        "imported {} event(s) into ledger namespace `{}`. The Iggy ledger (stream `{}`) is left as it \
+         was; delete it once you have checked `status`.",
+        events.len(),
+        postgres.namespace(),
+        ledger::STREAM
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 type Plan<'a> = Vec<(&'a Migration, Vec<Action>)>;
@@ -355,7 +472,13 @@ async fn rehearse(client: &IggyClient, report: &Report<'_>, image: Option<&str>)
     Ok(())
 }
 
-async fn apply(client: &IggyClient, m: &Migration, env: &migrations::Env) -> Result<()> {
+async fn apply(
+    client: &IggyClient,
+    ledger: &Ledger<'_>,
+    m: &Migration,
+    env: &migrations::Env,
+    runner: &str,
+) -> Result<()> {
     out!("{}", m.id);
     let started = Instant::now();
     let mut result = Ok(());
@@ -370,19 +493,19 @@ async fn apply(client: &IggyClient, m: &Migration, env: &migrations::Env) -> Res
         }
     }
     let status = if result.is_ok() { Status::Applied } else { Status::Failed };
-    let mut event = event(m, env, status, m.ops.clone(), started);
+    let mut event = event(m, env, runner, status, m.ops.clone(), started);
     event.error = result.as_ref().err().map(|e| format!("{e:#}"));
-    ledger::append(client, &event).await?;
+    ledger.append(&event).await?;
     result.map_err(|e| e.context(format!("{} failed; fix it and run `up` again", m.id)))
 }
 
 /// Records a baseline as applied without running it.
-async fn mark(client: &IggyClient, m: &Migration, env: &migrations::Env) -> Result<()> {
+async fn mark(ledger: &Ledger<'_>, m: &Migration, env: &migrations::Env, runner: &str) -> Result<()> {
     out!("{}\n  marked applied (all {} replaced migrations are applied)", m.id, m.direct_replaces().count());
-    ledger::append(client, &event(m, env, Status::Baselined, Vec::new(), Instant::now())).await
+    ledger.append(&event(m, env, runner, Status::Baselined, Vec::new(), Instant::now())).await
 }
 
-fn event(m: &Migration, env: &migrations::Env, status: Status, ops: Vec<op::Op>, started: Instant) -> Event {
+fn event(m: &Migration, env: &migrations::Env, runner: &str, status: Status, ops: Vec<op::Op>, started: Instant) -> Event {
     Event {
         id: m.id.clone(),
         status,
@@ -393,9 +516,7 @@ fn event(m: &Migration, env: &migrations::Env, status: Status, ops: Vec<op::Op>,
         replaces: m.replaces.iter().map(|r| r.id.clone()).collect(),
         applied_at: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         duration_ms: started.elapsed().as_millis() as u64,
-        runner: std::env::var("IGGY_MIGRATE_RUNNER")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "unknown".into()),
+        runner: runner.into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
     }
 }
