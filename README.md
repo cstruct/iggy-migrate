@@ -70,6 +70,7 @@ ledger {
 | `iggy.url` | `iggy://iggy@localhost:8090` | connection string without the password |
 | `iggy.password` | | secret: the password for the user in `iggy.url` |
 | `iggy.token` | | secret: a personal access token instead (`iggy://host:port`) |
+| `iggy.connect_timeout` | `10s` | how long to try reaching the server before giving up |
 | `ledger.type` | `iggy` | `iggy` or `postgres` |
 | `ledger.url` | | Postgres connection string without the password |
 | `ledger.password` | | secret |

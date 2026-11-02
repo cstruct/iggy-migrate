@@ -64,13 +64,22 @@ pub struct Iggy {
     /// Personal access token, instead of a user and password.
     #[config(secret)]
     pub token: Option<String>,
+    /// How long to try reaching the server before giving up, such as `10s`.
+    #[facet(default = DEFAULT_CONNECT_TIMEOUT.to_string())]
+    pub connect_timeout: String,
 }
 
 const DEFAULT_IGGY_URL: &str = "iggy://iggy@localhost:8090";
+const DEFAULT_CONNECT_TIMEOUT: &str = "10s";
 
 impl Default for Iggy {
     fn default() -> Self {
-        Iggy { url: DEFAULT_IGGY_URL.into(), password: None, token: None }
+        Iggy {
+            url: DEFAULT_IGGY_URL.into(),
+            password: None,
+            token: None,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT.into(),
+        }
     }
 }
 
@@ -309,8 +318,13 @@ mod tests {
     }
 
     fn iggy(url: &str, password: Option<&str>, token: Option<&str>) -> Result<String> {
-        config(Iggy { url: url.into(), password: password.map(Into::into), token: token.map(Into::into) })
-            .iggy_connection_string()
+        config(Iggy {
+            url: url.into(),
+            password: password.map(Into::into),
+            token: token.map(Into::into),
+            ..Iggy::default()
+        })
+        .iggy_connection_string()
     }
 
     #[test]

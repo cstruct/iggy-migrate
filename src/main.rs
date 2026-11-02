@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use iggy::prelude::*;
 
@@ -223,8 +223,19 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         | Command::Ledger(_) => {}
     }
 
+    // The SDK retries an unreachable server forever, so bound it.
+    let connect_timeout = config::parse_duration("iggy.connect_timeout", &config.iggy.connect_timeout)?;
     let client = IggyClient::from_connection_string(&config.iggy_connection_string()?)?;
-    client.connect().await.context("connecting to Iggy")?;
+    tokio::time::timeout(connect_timeout, client.connect())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "could not reach Iggy at {} within {} (iggy.connect_timeout)",
+                config.iggy.url,
+                humantime::format_duration(connect_timeout)
+            )
+        })?
+        .context("connecting to Iggy")?;
     let ledger = open_ledger(&config, &client).await?;
     if let Command::Ledger(LedgerCommand::Import) = cli.command {
         return import(&client, &ledger).await;
