@@ -4,8 +4,8 @@
 pub mod iggy;
 pub mod postgres;
 
-use anyhow::Result;
 use ::iggy::prelude::IggyClient;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::op::Op;

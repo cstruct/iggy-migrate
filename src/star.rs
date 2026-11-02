@@ -48,8 +48,7 @@ struct Limits {
     deadline: Duration,
 }
 
-const LIMITS: Limits =
-    Limits { ticks: 10_000_000, heap_bytes: 64 << 20, deadline: Duration::from_secs(5) };
+const LIMITS: Limits = Limits { ticks: 10_000_000, heap_bytes: 64 << 20, deadline: Duration::from_secs(5) };
 
 /// Evaluates a migration to its ops. `file` is the name shown in errors.
 pub fn eval(file: &str, source: &str, env: &Env) -> Result<Vec<Op>> {
@@ -76,10 +75,9 @@ pub fn diagnose(file: &str, source: &str, env: &Env) -> Option<EvalMessage> {
         Err(Failure::Starlark(e)) => Some(EvalMessage::from_error(path, &e)),
         Err(Failure::Other(e)) => Some(EvalMessage::from_any_error(path, &format!("{e:#}"))),
         Ok(evaluated) => match (is_baseline, evaluated.replaces.is_some()) {
-            (false, true) => Some(EvalMessage::from_any_error(
-                path,
-                &"only baselines (`*_baseline.star`) may assign `replaces`",
-            )),
+            (false, true) => {
+                Some(EvalMessage::from_any_error(path, &"only baselines (`*_baseline.star`) may assign `replaces`"))
+            }
             (true, false) => Some(EvalMessage::from_any_error(path, &"a baseline must assign `replaces = [...]`")),
             _ => None,
         },
@@ -198,9 +196,7 @@ struct NoLoads;
 
 impl FileLoader for NoLoads {
     fn load(&self, path: &str) -> starlark::Result<FrozenModule> {
-        Err(starlark::Error::new_other(anyhow!(
-            "cannot load `{path}`: migrations cannot load other files"
-        )))
+        Err(starlark::Error::new_other(anyhow!("cannot load `{path}`: migrations cannot load other files")))
     }
 }
 
@@ -235,16 +231,12 @@ fn op(op: Op) -> Result<OpValue> {
 }
 
 fn ops_from_value(value: Value) -> Result<Vec<Op>> {
-    let list = ListRef::from_value(value)
-        .ok_or_else(|| anyhow!("`ops` must be a list, got {}", value.get_type()))?;
+    let list = ListRef::from_value(value).ok_or_else(|| anyhow!("`ops` must be a list, got {}", value.get_type()))?;
     list.iter()
         .enumerate()
         .map(|(i, item)| match item.downcast_ref::<OpValue>() {
             Some(op) => Ok(op.0.clone()),
-            None => bail!(
-                "ops[{i}] must be an op made with create_topic(...) etc., got {} `{item}`",
-                item.get_type()
-            ),
+            None => bail!("ops[{i}] must be an op made with create_topic(...) etc., got {} `{item}`", item.get_type()),
         })
         .collect()
 }
@@ -434,7 +426,8 @@ ops = [create_stream(name = "orders")] + [
 
     #[test]
     fn evaluation_is_bounded() {
-        let bounded = |source: &str, limits| format!("{:#}", eval_with("m.star", source, &env("dev"), limits).unwrap_err());
+        let bounded =
+            |source: &str, limits| format!("{:#}", eval_with("m.star", source, &env("dev"), limits).unwrap_err());
         let loop_ = "def f():\n    for i in range(1000000000):\n        pass\nf()\nops = []";
         assert!(bounded(loop_, Limits { ticks: 100_000, ..LIMITS }).contains("ticks"));
         let timed = Limits { ticks: u64::MAX, deadline: Duration::from_millis(200), ..LIMITS };

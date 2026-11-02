@@ -3,9 +3,9 @@
 
 use std::str::FromStr;
 
+use super::Event;
 use anyhow::{Context, Result, bail};
 use iggy::prelude::*;
-use super::Event;
 
 pub const STREAM: &str = "migration";
 pub const TOPIC: &str = "migration";
@@ -35,10 +35,7 @@ pub async fn ensure(client: &IggyClient) -> Result<()> {
                 max_topic_size: Some(MaxTopicSize::Unlimited),
                 ..Default::default()
             };
-            client
-                .create_topic(&stream_id(), TOPIC, &options)
-                .await
-                .context("creating ledger topic")?;
+            client.create_topic(&stream_id(), TOPIC, &options).await.context("creating ledger topic")?;
         }
         Some(topic) => {
             if topic.partitions_count != 1
@@ -85,9 +82,8 @@ pub async fn read(client: &IggyClient) -> Result<Vec<Event>> {
         };
         offset = last.header.offset + 1;
         for message in &polled.messages {
-            let event = serde_json::from_slice(&message.payload).with_context(|| {
-                format!("ledger message at offset {} is not a valid event", message.header.offset)
-            })?;
+            let event = serde_json::from_slice(&message.payload)
+                .with_context(|| format!("ledger message at offset {} is not a valid event", message.header.offset))?;
             events.push(event);
         }
     }
@@ -98,12 +94,7 @@ pub async fn append(client: &IggyClient, event: &Event) -> Result<()> {
     let payload = serde_json::to_string(event)?;
     let mut messages = [IggyMessage::from_str(&payload)?];
     client
-        .send_messages(
-            &stream_id(),
-            &topic_id(),
-            &Partitioning::partition_id(PARTITION),
-            &mut messages,
-        )
+        .send_messages(&stream_id(), &topic_id(), &Partitioning::partition_id(PARTITION), &mut messages)
         .await
         .context("writing ledger event")?;
     Ok(())

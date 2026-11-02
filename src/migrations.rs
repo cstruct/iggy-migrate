@@ -127,11 +127,7 @@ fn load(path: &Path, env: &Env) -> Result<Migration> {
         validate(op).with_context(|| format!("op {} ({op:?})", i + 1))?;
     }
     validate_updates(&ops)?;
-    let checksum = if replaces.is_empty() {
-        checksum(&ops)
-    } else {
-        checksum(&(&replaces, &ops))
-    };
+    let checksum = if replaces.is_empty() { checksum(&ops) } else { checksum(&(&replaces, &ops)) };
     Ok(Migration { id, path: path.to_path_buf(), ops, checksum, replaces })
 }
 
@@ -181,11 +177,7 @@ pub fn validate(op: &Op) -> Result<()> {
             (stream, vec![stream, name])
         }
         Op::UpdateTopic { stream, name, partitions, message_expiry, max_size, compression } => {
-            if partitions.is_none()
-                && message_expiry.is_none()
-                && max_size.is_none()
-                && compression.is_none()
-            {
+            if partitions.is_none() && message_expiry.is_none() && max_size.is_none() && compression.is_none() {
                 bail!(
                     "an update must set at least one of partitions, message_expiry, max_size, \
                      compression"
@@ -195,8 +187,9 @@ pub fn validate(op: &Op) -> Result<()> {
             (stream, vec![stream, name])
         }
         Op::DeleteTopic { stream, name } => (stream, vec![stream, name]),
-        Op::CreateConsumerGroup { stream, topic, name }
-        | Op::DeleteConsumerGroup { stream, topic, name } => (stream, vec![stream, topic, name]),
+        Op::CreateConsumerGroup { stream, topic, name } | Op::DeleteConsumerGroup { stream, topic, name } => {
+            (stream, vec![stream, topic, name])
+        }
     };
     if names.iter().any(|n| n.trim().is_empty()) {
         bail!("names must not be empty");

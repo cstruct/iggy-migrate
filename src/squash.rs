@@ -36,13 +36,8 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
                 None => state.push(op.clone()),
             }
         } else if let Op::UpdateTopic { partitions, message_expiry, max_size, compression, .. } = op {
-            let Some(Op::CreateTopic {
-                partitions: p,
-                message_expiry: e,
-                max_size: s,
-                compression: c,
-                ..
-            }) = existing.map(|i| &mut state[i])
+            let Some(Op::CreateTopic { partitions: p, message_expiry: e, max_size: s, compression: c, .. }) =
+                existing.map(|i| &mut state[i])
             else {
                 bail!("history updates topic {k} before creating it");
             };
@@ -75,8 +70,7 @@ pub fn fold<'a>(history: impl IntoIterator<Item = &'a Op>) -> Result<Vec<Op>> {
 /// Whether re-creating `existing` with `op` fails, mirroring the executor:
 /// settings `op` leaves to the server default are not compared.
 fn conflicts(existing: &Op, op: &Op) -> Result<bool> {
-    let (Op::CreateTopic { partitions: p1, .. }, Op::CreateTopic { partitions: p2, .. }) = (existing, op)
-    else {
+    let (Op::CreateTopic { partitions: p1, .. }, Op::CreateTopic { partitions: p2, .. }) = (existing, op) else {
         return Ok(false);
     };
     if p1 != p2 {
@@ -123,10 +117,7 @@ pub fn render(per_env: &BTreeMap<String, Baseline>) -> String {
         .map(|(i, replaced)| {
             let checksum = by_env(per_env, |b| string(&b.replaces[i].checksum));
             let parent = replaced.parent.as_deref().map_or("None".into(), string);
-            format!(
-                "{{\"id\": {}, \"checksum\": {checksum}, \"parent\": {parent}}}",
-                string(&replaced.id)
-            )
+            format!("{{\"id\": {}, \"checksum\": {checksum}, \"parent\": {parent}}}", string(&replaced.id))
         })
         .collect();
     out.push_str(&format!("replaces = {}\n\n", list(replaces)));
@@ -173,9 +164,8 @@ fn list(items: Vec<String>) -> String {
 }
 
 fn render_op_by_env(ops: &[(&str, &Op)]) -> String {
-    let values = |f: &dyn Fn(&Op) -> String| -> String {
-        per_env_values(ops.iter().map(|(e, op)| (*e, f(op))).collect())
-    };
+    let values =
+        |f: &dyn Fn(&Op) -> String| -> String { per_env_values(ops.iter().map(|(e, op)| (*e, f(op))).collect()) };
     let Op::CreateTopic { stream, name, .. } = ops[0].1 else {
         return values(&render_op);
     };
@@ -206,10 +196,7 @@ fn render_op(op: &Op) -> String {
             string(topic),
             string(name)
         ),
-        Op::UpdateTopic { .. }
-        | Op::DeleteStream { .. }
-        | Op::DeleteTopic { .. }
-        | Op::DeleteConsumerGroup { .. } => {
+        Op::UpdateTopic { .. } | Op::DeleteStream { .. } | Op::DeleteTopic { .. } | Op::DeleteConsumerGroup { .. } => {
             unreachable!("a folded state contains only creates")
         }
     }
@@ -291,8 +278,8 @@ pub async fn run(dir: &Path, environments: &[String], through: Option<&str>, ima
     for (env, migrations) in &loaded {
         let prefix = &migrations[..end];
         let replaces = replaces_for(prefix);
-        let ops = fold(prefix.iter().flat_map(|m| &m.ops))
-            .with_context(|| format!("env {env}: cannot fold history"))?;
+        let ops =
+            fold(prefix.iter().flat_map(|m| &m.ops)).with_context(|| format!("env {env}: cannot fold history"))?;
         per_env.insert(env.clone(), Baseline { replaces, ops });
     }
     let source = render(&per_env);
@@ -315,7 +302,9 @@ pub async fn run(dir: &Path, environments: &[String], through: Option<&str>, ima
             checksum: String::new(),
             replaces: baseline.replaces.clone(),
         };
-        rehearsal::apply(&server.client, &[&migration]).await.with_context(|| format!("env {env}: baseline does not apply"))?;
+        rehearsal::apply(&server.client, &[&migration])
+            .await
+            .with_context(|| format!("env {env}: baseline does not apply"))?;
         let got = rehearsal::snapshot(&server.client).await?;
         if got != want {
             bail!(
@@ -391,8 +380,7 @@ mod tests {
 
     #[test]
     fn updates_are_folded_into_the_create() {
-        let history =
-            vec![stream("a"), topic("a", "t", 1), update(Some(4), None), update(None, Some("7d"))];
+        let history = vec![stream("a"), topic("a", "t", 1), update(Some(4), None), update(None, Some("7d"))];
         let Op::CreateTopic { partitions, message_expiry, .. } = &fold(&history).unwrap()[1] else {
             panic!("expected a topic");
         };
@@ -490,8 +478,7 @@ mod tests {
         };
         let b1 = m("3_baseline", vec![replaced("1_a", "c-1_a"), replaced("2_b", "c-2_b")]);
         let r = replaces_for(&[b1, m("4_c", vec![])]);
-        let summary: Vec<(&str, Option<&str>)> =
-            r.iter().map(|r| (r.id.as_str(), r.parent.as_deref())).collect();
+        let summary: Vec<(&str, Option<&str>)> = r.iter().map(|r| (r.id.as_str(), r.parent.as_deref())).collect();
         assert_eq!(
             summary,
             vec![("3_baseline", None), ("1_a", Some("3_baseline")), ("2_b", Some("3_baseline")), ("4_c", None)]

@@ -29,9 +29,9 @@ macro_rules! out {
         let _ = writeln!(std::io::stdout(), $($arg)*);
     }};
 }
-pub(crate) use out;
 use ledger::{Event, Ledger, Status};
 use migrations::{Migration, Replaced};
+pub(crate) use out;
 
 #[derive(Parser)]
 #[command(version, about = "Forward-only migrations for Iggy streams, topics and consumer groups")]
@@ -204,7 +204,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     .with_context(|| format!("env {name}: history does not apply from scratch"))?;
                 out!(
                     "env {name}: {} migration(s) apply from scratch ({} op(s) applied, {} skipped)",
-                    s.migrations, s.applied, s.skipped
+                    s.migrations,
+                    s.applied,
+                    s.skipped
                 );
             }
             return Ok(ExitCode::SUCCESS);
@@ -257,7 +259,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 out!("{}", serde_json::to_string_pretty(&doc)?);
             } else {
                 for m in report.to_mark() {
-                    out!("{}\n  mark applied (all {} replaced migrations are applied)", m.id, m.direct_replaces().count());
+                    out!(
+                        "{}\n  mark applied (all {} replaced migrations are applied)",
+                        m.id,
+                        m.direct_replaces().count()
+                    );
                 }
                 for (m, actions) in &plan {
                     out!("{}", m.id);
@@ -453,10 +459,7 @@ async fn rehearse(client: &IggyClient, report: &Report<'_>, image: Option<&str>)
     let image = image.map_or_else(|| format!("apache/iggy:{version}"), str::to_string);
     let server = rehearsal::Server::start(&image).await?;
     if server.version != version {
-        eprintln!(
-            "warning: rehearsal server runs {} but the target runs {version}",
-            server.version
-        );
+        eprintln!("warning: rehearsal server runs {} but the target runs {version}", server.version);
     }
     let copied = rehearsal::copy_state(client, &server.client)
         .await
@@ -467,7 +470,9 @@ async fn rehearse(client: &IggyClient, report: &Report<'_>, image: Option<&str>)
         .context("rehearsal failed, nothing was applied to the target")?;
     out!(
         "rehearsal passed on a copy of {copied} resource(s): {} migration(s), {} op(s) applied, {} skipped\n",
-        s.migrations, s.applied, s.skipped
+        s.migrations,
+        s.applied,
+        s.skipped
     );
     Ok(())
 }
@@ -505,7 +510,14 @@ async fn mark(ledger: &Ledger<'_>, m: &Migration, env: &migrations::Env, runner:
     ledger.append(&event(m, env, runner, Status::Baselined, Vec::new(), Instant::now())).await
 }
 
-fn event(m: &Migration, env: &migrations::Env, runner: &str, status: Status, ops: Vec<op::Op>, started: Instant) -> Event {
+fn event(
+    m: &Migration,
+    env: &migrations::Env,
+    runner: &str,
+    status: Status,
+    ops: Vec<op::Op>,
+    started: Instant,
+) -> Event {
     Event {
         id: m.id.clone(),
         status,
@@ -523,13 +535,18 @@ fn event(m: &Migration, env: &migrations::Env, runner: &str, status: Status, ops
 
 enum State<'a> {
     Applied(&'a Event),
-    Pending { out_of_order: bool },
+    Pending {
+        out_of_order: bool,
+    },
     Changed(&'a Event),
     /// A baseline whose replaced migrations are all applied: mark it applied.
     Mark,
     /// A baseline whose replaced migrations are only partly applied, or were
     /// applied with different checksums.
-    Partial { not_applied: Vec<String>, mismatched: Vec<String> },
+    Partial {
+        not_applied: Vec<String>,
+        mismatched: Vec<String>,
+    },
 }
 
 struct Report<'a> {
@@ -561,9 +578,7 @@ impl<'a> Report<'a> {
                     Some(e) if e.checksum == m.checksum => State::Applied(e),
                     Some(e) => State::Changed(e),
                     None if m.is_baseline() => baseline_state(m, &applied),
-                    None => State::Pending {
-                        out_of_order: latest_applied.is_some_and(|l| m.id.as_str() < l),
-                    },
+                    None => State::Pending { out_of_order: latest_applied.is_some_and(|l| m.id.as_str() < l) },
                 };
                 (m, state)
             })
@@ -596,11 +611,7 @@ impl<'a> Report<'a> {
     /// Migrations whose ops this server's state reflects: applied ones, and
     /// baselines about to be marked because what they replace is applied.
     fn applied(&self) -> Vec<&'a Migration> {
-        self.rows
-            .iter()
-            .filter(|(_, s)| matches!(s, State::Applied(_) | State::Mark))
-            .map(|(m, _)| *m)
-            .collect()
+        self.rows.iter().filter(|(_, s)| matches!(s, State::Applied(_) | State::Mark)).map(|(m, _)| *m).collect()
     }
 
     fn is_up_to_date(&self) -> bool {
@@ -643,7 +654,10 @@ impl<'a> Report<'a> {
                 State::Changed(e) => push!(
                     "CHANGED   {}  (applied {} with {}, file now evaluates to {}); restore it and \
                      add a new migration instead",
-                    m.id, e.applied_at, e.checksum, m.checksum
+                    m.id,
+                    e.applied_at,
+                    e.checksum,
+                    m.checksum
                 ),
                 State::Mark => push!(
                     "pending   {}  (baseline; will be marked applied, all {} replaced migrations are applied)",
@@ -651,24 +665,22 @@ impl<'a> Report<'a> {
                     m.direct_replaces().count()
                 ),
                 State::Partial { not_applied, mismatched } => {
-                    push!("PARTIAL   {}  (baseline, but this server is partway through the migrations it replaces)", m.id);
+                    push!(
+                        "PARTIAL   {}  (baseline, but this server is partway through the migrations it replaces)",
+                        m.id
+                    );
                     if !not_applied.is_empty() {
                         push!("          not applied here: {}", not_applied.join(", "));
                     }
                     if !mismatched.is_empty() {
                         push!("          applied with a different checksum: {}", mismatched.join(", "));
                     }
-                    push!(
-                        "          apply them from the commit before the squash, then run `up` again"
-                    );
+                    push!("          apply them from the commit before the squash, then run `up` again");
                 }
             }
         }
         for e in &self.missing {
-            push!(
-                "MISSING   {}  (applied {} but the file is gone); restore it",
-                e.id, e.applied_at
-            );
+            push!("MISSING   {}  (applied {} but the file is gone); restore it", e.id, e.applied_at);
         }
         if self.rows.is_empty() && self.missing.is_empty() {
             push!("no migrations");

@@ -55,9 +55,7 @@ pub async fn detect(client: &IggyClient, applied: &[&Migration]) -> Result<Vec<I
     }
     items.extend(actual.into_keys().map(|k| item(Kind::Unmanaged, k, None)));
     let reported: Vec<(Kind, String)> = items.iter().map(|i| (i.kind, i.key.clone())).collect();
-    items.retain(|i| {
-        !executor::ancestors(&i.key).any(|a| reported.iter().any(|(kind, k)| *kind == i.kind && *k == a))
-    });
+    items.retain(|i| !executor::ancestors(&i.key).any(|a| reported.iter().any(|(kind, k)| *kind == i.kind && *k == a)));
     items.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(items)
 }
