@@ -51,9 +51,12 @@ impl Planned {
         None
     }
 
-    fn record(&mut self, op: &Op) {
+    /// Records what `op` would change. A skipped op changes nothing: a create
+    /// skipped because the resource already exists must not mark its children
+    /// absent, as a stream this run creates has none.
+    fn record(&mut self, op: &Op, action: &Action) {
         let key = key(op);
-        if matches!(op, Op::UpdateTopic { .. }) {
+        if *action != Action::Apply || matches!(op, Op::UpdateTopic { .. }) {
             return;
         }
         if creates(op) {
@@ -118,7 +121,7 @@ pub async fn run(client: &IggyClient, op: &Op, mode: Mode<'_>) -> Result<Action>
         None => check(client, op).await?,
     };
     match mode {
-        Mode::DryRun(planned) => planned.record(op),
+        Mode::DryRun(planned) => planned.record(op, &action),
         Mode::Apply if action == Action::Apply => execute(client, op).await?,
         Mode::Apply => {}
     }
@@ -408,7 +411,7 @@ mod tests {
     #[test]
     fn planned_children_of_created_stream_do_not_exist() {
         let mut p = Planned::default();
-        p.record(&stream("orders"));
+        p.record(&stream("orders"), &Action::Apply);
         assert_eq!(p.exists("orders"), Some(true));
         assert_eq!(p.exists("orders/events"), Some(false));
         assert_eq!(p.exists("other/events"), None);
@@ -417,14 +420,24 @@ mod tests {
     #[test]
     fn planned_delete_removes_descendants() {
         let mut p = Planned::default();
-        p.record(&stream("orders"));
-        p.record(&topic("orders", "events"));
-        p.record(&Op::DeleteStream { name: "orders".into() });
+        p.record(&stream("orders"), &Action::Apply);
+        p.record(&topic("orders", "events"), &Action::Apply);
+        p.record(&Op::DeleteStream { name: "orders".into() }, &Action::Apply);
         assert_eq!(p.exists("orders"), Some(false));
         assert_eq!(p.exists("orders/events"), Some(false));
-        p.record(&stream("orders"));
+        p.record(&stream("orders"), &Action::Apply);
         assert_eq!(p.exists("orders"), Some(true));
         assert_eq!(p.exists("orders/events"), Some(false));
+    }
+
+    #[test]
+    fn planned_skips_leave_server_state_alone() {
+        let mut p = Planned::default();
+        p.record(&stream("orders"), &Action::Skip("already exists"));
+        assert_eq!(p.exists("orders"), None);
+        assert_eq!(p.exists("orders/events"), None);
+        p.record(&Op::DeleteStream { name: "gone".into() }, &Action::Skip("already absent"));
+        assert_eq!(p.exists("gone"), None);
     }
 
     #[test]
