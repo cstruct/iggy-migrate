@@ -79,8 +79,9 @@ pub fn key(op: &Op) -> String {
         | Op::DeleteTopic { stream, name } => {
             format!("{stream}/{name}")
         }
-        Op::CreateConsumerGroup { stream, topic, name }
-        | Op::DeleteConsumerGroup { stream, topic, name } => format!("{stream}/{topic}/{name}"),
+        Op::CreateConsumerGroup { stream, topic, name } | Op::DeleteConsumerGroup { stream, topic, name } => {
+            format!("{stream}/{topic}/{name}")
+        }
     }
 }
 
@@ -172,28 +173,20 @@ async fn check(client: &IggyClient, op: &Op) -> Result<Action> {
             let Some(existing) = get_topic(client, stream, name).await? else {
                 bail!("cannot update {stream}/{name}: topic does not exist");
             };
-            if topic_update(op, &existing)?.is_empty() {
-                Action::Skip("already up to date")
-            } else {
-                Action::Apply
-            }
+            if topic_update(op, &existing)?.is_empty() { Action::Skip("already up to date") } else { Action::Apply }
         }
         Op::DeleteTopic { stream, name } => match get_topic(client, stream, name).await? {
             Some(_) => Action::Apply,
             None => Action::Skip("already absent"),
         },
-        Op::CreateConsumerGroup { stream, topic, name } => {
-            match get_group(client, stream, topic, name).await? {
-                Some(_) => Action::Skip("already exists"),
-                None => Action::Apply,
-            }
-        }
-        Op::DeleteConsumerGroup { stream, topic, name } => {
-            match get_group(client, stream, topic, name).await? {
-                Some(_) => Action::Apply,
-                None => Action::Skip("already absent"),
-            }
-        }
+        Op::CreateConsumerGroup { stream, topic, name } => match get_group(client, stream, topic, name).await? {
+            Some(_) => Action::Skip("already exists"),
+            None => Action::Apply,
+        },
+        Op::DeleteConsumerGroup { stream, topic, name } => match get_group(client, stream, topic, name).await? {
+            Some(_) => Action::Apply,
+            None => Action::Skip("already absent"),
+        },
     })
 }
 
@@ -231,19 +224,14 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
             let mut options = TopicUpdateOptions::default();
             for change in topic_update(op, &existing)? {
                 match change {
-                    Change::Partitions(n) => {
-                        client.create_partitions(&id(stream)?, &id(name)?, n).await?
-                    }
+                    Change::Partitions(n) => client.create_partitions(&id(stream)?, &id(name)?, n).await?,
                     Change::Expiry(e) => options.message_expiry = Some(e),
                     Change::MaxSize(s) => options.max_topic_size = Some(s),
                     Change::Compression(c) => options.compression_algorithm = Some(c),
                 }
             }
             if options != TopicUpdateOptions::default() {
-                client
-                    .update_topic(&id(stream)?, &id(name)?, &existing.name, &options)
-                    .await
-                    .map_err(size_hint)?;
+                client.update_topic(&id(stream)?, &id(name)?, &existing.name, &options).await.map_err(size_hint)?;
             }
         }
         Op::DeleteTopic { stream, name } => client.delete_topic(&id(stream)?, &id(name)?).await?,
@@ -260,9 +248,10 @@ async fn execute(client: &IggyClient, op: &Op) -> Result<()> {
 /// The server's error for a max size below the segment size prints the wrong
 /// numbers, so say what the limit actually is.
 fn size_hint(e: IggyError) -> anyhow::Error {
-    let hint = e.to_string().contains("segment size").then_some(
-        "max_size must be at least the topic's segment_size (1 GiB unless set; note 1 GB < 1 GiB)",
-    );
+    let hint = e
+        .to_string()
+        .contains("segment size")
+        .then_some("max_size must be at least the topic's segment_size (1 GiB unless set; note 1 GB < 1 GiB)");
     match hint {
         Some(hint) => anyhow::Error::new(e).context(hint),
         None => e.into(),
@@ -281,16 +270,7 @@ enum Change {
 /// create is checked: settings the op leaves to the server default are not
 /// compared.
 pub fn topic_diffs(op: &Op, existing: &TopicDetails) -> Result<Vec<String>> {
-    let Op::CreateTopic {
-        partitions,
-        message_expiry,
-        max_size,
-        compression,
-        segment_size,
-        durability,
-        ..
-    } = op
-    else {
+    let Op::CreateTopic { partitions, message_expiry, max_size, compression, segment_size, durability, .. } = op else {
         unreachable!("only called for CreateTopic");
     };
     let runtime = iggy_common::TopicRuntimeOptions::from_resource_options(&existing.options);
@@ -333,8 +313,7 @@ pub fn topic_diffs(op: &Op, existing: &TopicDetails) -> Result<Vec<String>> {
 /// already up to date. Shrinking a topic is an error, since Iggy removes
 /// partitions by deleting them and their messages.
 fn topic_update(op: &Op, existing: &TopicDetails) -> Result<Vec<Change>> {
-    let Op::UpdateTopic { stream, name, partitions, message_expiry, max_size, compression } = op
-    else {
+    let Op::UpdateTopic { stream, name, partitions, message_expiry, max_size, compression } = op else {
         unreachable!("only called for UpdateTopic");
     };
     let mut changes = Vec::new();
@@ -378,12 +357,7 @@ async fn get_topic(client: &IggyClient, stream: &str, name: &str) -> Result<Opti
     Ok(client.get_topic(&id(stream)?, &id(name)?).await?)
 }
 
-async fn get_group(
-    client: &IggyClient,
-    stream: &str,
-    topic: &str,
-    name: &str,
-) -> Result<Option<ConsumerGroupDetails>> {
+async fn get_group(client: &IggyClient, stream: &str, topic: &str, name: &str) -> Result<Option<ConsumerGroupDetails>> {
     if get_topic(client, stream, topic).await?.is_none() {
         return Ok(None);
     }
@@ -399,8 +373,7 @@ pub fn parse_size(s: &str) -> Result<MaxTopicSize> {
 }
 
 pub fn parse_compression(s: &str) -> Result<CompressionAlgorithm> {
-    CompressionAlgorithm::from_str(s)
-        .map_err(|e| anyhow::anyhow!("invalid compression `{s}` (use none or gzip): {e}"))
+    CompressionAlgorithm::from_str(s).map_err(|e| anyhow::anyhow!("invalid compression `{s}` (use none or gzip): {e}"))
 }
 
 pub fn parse_segment_size(s: &str) -> Result<IggyByteSize> {
@@ -408,8 +381,7 @@ pub fn parse_segment_size(s: &str) -> Result<IggyByteSize> {
 }
 
 pub fn parse_durability(s: &str) -> Result<Durability> {
-    Durability::from_str(s)
-        .map_err(|e| anyhow::anyhow!("invalid durability `{s}` (use replicated or persisted): {e}"))
+    Durability::from_str(s).map_err(|e| anyhow::anyhow!("invalid durability `{s}` (use replicated or persisted): {e}"))
 }
 
 #[cfg(test)]

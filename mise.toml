@@ -1,0 +1,9 @@
+[tools]
+# The Rust toolchain, installed through rustup.
+rust = { version = "1.99.0", components = "rustfmt,clippy" }
+# Checks the dependencies for security advisories, licenses and sources, see deny.toml.
+"github:EmbarkStudios/cargo-deny" = "0.19.9"
+
+[tasks.deny]
+description = "Check the dependencies for security advisories, licenses and sources"
+run = "cargo deny --locked check"

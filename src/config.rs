@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use ordna_core::{
-    ConfigBuilder, ConfigLoadError, ConfigModel, ConfigPath, DiagnosticValue, SourceFieldPath,
-    SourceMeta, ValuesSource, config,
+    ConfigBuilder, ConfigLoadError, ConfigModel, ConfigPath, DiagnosticValue, SourceFieldPath, SourceMeta,
+    ValuesSource, config,
 };
 use ordna_source_env::{EnvSource, EnvVarDetail};
 use ordna_source_styx::{StyxSource, styx_file};

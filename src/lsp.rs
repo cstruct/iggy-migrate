@@ -125,8 +125,7 @@ mod tests {
     #[test]
     fn globals_are_known() {
         let context = Context { environments: vec!["dev".into()] };
-        let names: Vec<String> =
-            context.get_environment(&LspUri::File("/m.star".into())).members.into_keys().collect();
+        let names: Vec<String> = context.get_environment(&LspUri::File("/m.star".into())).members.into_keys().collect();
         for name in ["create_topic", "update_topic", "per_env", "env"] {
             assert!(names.iter().any(|n| n == name), "{name} missing from {names:?}");
         }
