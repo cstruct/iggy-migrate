@@ -400,11 +400,11 @@ ops = [create_stream(name = "orders")] + [
         assert_eq!(eval_ok(ORDERS, "prod").len(), 5);
     }
 
-    /// Ledgers written while migrations were Dhall record checksums of the
-    /// evaluated ops; the Starlark rewrite of a migration must match them.
-    /// Adding fields to ops must not change them either.
+    /// Ledgers record checksums of the evaluated ops, so they must never change
+    /// for the same ops: not when fields are added to ops, nor when
+    /// dependencies change how they serialize.
     #[test]
-    fn checksums_match_the_dhall_era() {
+    fn checksums_are_stable() {
         let source = include_str!("../migrations/20261101120000_create_orders.star");
         assert_eq!(
             checksum(&eval("m.star", source, &env("dev")).unwrap()),

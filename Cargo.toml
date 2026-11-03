@@ -2,6 +2,8 @@
 name = "iggy-migrate"
 version = "0.1.1"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/cstruct/iggy-migrate"
 publish = false
 
 [dependencies]
