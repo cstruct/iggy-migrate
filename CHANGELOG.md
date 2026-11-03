@@ -16,6 +16,10 @@ All notable changes to iggy-migrate. Versions follow
 
 ### Added
 
+- Static Linux binaries, built with musl, for x86_64 and arm64. They run on
+  any distribution, Alpine included.
+- A Docker image, `ghcr.io/cstruct/iggy-migrate`, for amd64 and arm64, with
+  the docker CLI for rehearsals. See `docs/docker.md`.
 - `ledger history` lists every ledger event, failed runs and their errors
   included, and `ledger show <id>` prints everything recorded for one
   migration. Both take `--json`.

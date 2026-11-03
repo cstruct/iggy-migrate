@@ -100,9 +100,14 @@ This pulls `main`, sets the version in `Cargo.toml` and `Cargo.lock`, moves
 the changelog's `## Unreleased` entries under `## 0.2.0 - <today>`, commits
 "Release 0.2.0", pushes it straight to `main` and pushes the tag `v0.2.0`. The
 tag starts the release workflow, which runs CI on the tagged commit, builds
-binaries for Linux (x86_64 and arm64, glibc 2.35 and later) and macOS (arm64),
-and publishes them with `SHA256SUMS` as a GitHub release, with the version's
-changelog entries as its notes.
+binaries for Linux (x86_64 and arm64, glibc 2.35 and later, and static musl)
+and macOS (arm64), and publishes them with `SHA256SUMS` as a GitHub release,
+with the version's changelog entries as its notes. It also pushes the Docker
+image, with the musl binaries copied in, to `ghcr.io/cstruct/iggy-migrate`
+as `<version>`, and for releases also as `<major>.<minor>` and `latest`.
+
+`docker build .` builds the image from source, as CI does on every pull
+request.
 
 A version with a suffix, such as `0.2.0-rc.1`, is published as a prerelease.
 It leaves the changelog alone, and its release notes are generated from the

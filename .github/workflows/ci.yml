@@ -73,3 +73,22 @@ jobs:
               cargo run --locked -q -- --env "$env" eval "$file" > /dev/null
             done
           done
+
+  # Builds on musl, as the static release binaries do, and checks the image
+  # starts. Releases copy their own binaries into the image instead.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image from source
+        run: docker build --target from-source -t iggy-migrate:ci .
+
+      - name: Smoke test the image
+        run: |
+          docker run --rm iggy-migrate:ci --version
+          docker run --rm --entrypoint docker iggy-migrate:ci --version

@@ -83,9 +83,23 @@ applied   20261103100000_create_payments  (2026-11-03T09:35:49Z by ci)
 ## Install
 
 Download a binary from the
-[releases](https://github.com/cstruct/iggy-migrate/releases) for Linux
-(x86_64 and arm64, glibc 2.35 or later) or macOS (arm64), and check it
-against `SHA256SUMS`. Or build it with Rust:
+[releases](https://github.com/cstruct/iggy-migrate/releases) and check it
+against `SHA256SUMS`:
+
+| Platform | Archive |
+| --- | --- |
+| Linux, any distribution (static) | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` |
+| Linux, glibc 2.35 or later | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
+| macOS | `aarch64-apple-darwin` |
+
+Or run the Docker image, for amd64 and arm64, from the directory with your
+config and migrations (see [Docker](docs/docker.md) for rehearsals):
+
+```bash
+docker run --rm -v "$PWD:/work" ghcr.io/cstruct/iggy-migrate status
+```
+
+Or build it with Rust:
 
 ```bash
 cargo install --locked --git https://github.com/cstruct/iggy-migrate
@@ -134,6 +148,7 @@ iggy-migrate up
   runners
 - [The ledger](docs/ledger.md): Iggy or Postgres, history, and repairing it
 - [Squashing](docs/squashing.md): replacing old migrations with a baseline
+- [Docker](docs/docker.md): running the image, rehearsals included
 
 ## Compatibility
 
