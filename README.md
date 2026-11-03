@@ -94,11 +94,14 @@ and is not guarded.
 
 ### CI
 
-| Command | Exit code |
+Every command exits 0 on success and 1 on an error, including invalid
+arguments. Exit code 2 means a command ran and found something:
+
+| Command | Exit code 2 |
 | --- | --- |
-| `status` | 1 if any migration is CHANGED, PARTIAL or MISSING |
-| `plan --detailed-exitcode` | 2 if there is something to apply, 0 if not |
-| `drift` | 1 if the server differs from the applied migrations |
+| `status` | a migration is CHANGED, PARTIAL or MISSING |
+| `plan --detailed-exitcode` | there is something to apply |
+| `drift` | the server differs from the applied migrations |
 
 `status`, `plan` and `drift` take `--json` for machine-readable output on
 stdout; errors and refusals still go to stderr as text.
