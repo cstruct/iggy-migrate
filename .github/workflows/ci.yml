@@ -1,8 +1,8 @@
 name: CI
 
+# Not on pushes to main: pull requests are checked before they merge, and
+# releases run this again on the tagged commit.
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -32,12 +32,13 @@ jobs:
         with:
           persist-credentials: false
 
-      # Rust and cargo-deny, as pinned in mise.toml.
+      # Rust, cargo-deny and actionlint, as pinned in mise.toml.
       - name: Install tools
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
 
-      - name: Cache Cargo dependencies and build artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore Cargo dependencies and build artifacts
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -47,32 +48,26 @@ jobs:
           restore-keys: |
             ci-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Check formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt --all -- --check
-
-      # Security advisories, licenses and sources of the dependencies, by deny.toml.
-      - name: Check dependencies
-        if: runner.os == 'Linux'
-        run: cargo deny --locked check
-
+      # Formatting, cargo-deny, clippy and actionlint.
       - name: Lint
         if: runner.os == 'Linux'
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: mise run lint
 
-      - name: Run tests
-        run: cargo test --locked --all-features
+      # The tests, and the example migrations evaluated in every environment.
+      - name: Test
+        run: mise run test
 
-      # Only evaluated, in every environment: `verify` would need Docker for its
-      # throwaway server.
-      - name: Evaluate the example migrations
-        if: runner.os == 'Linux'
-        run: |
-          for env in dev staging prod; do
-            for file in migrations/*.star; do
-              cargo run --locked -q -- --env "$env" eval "$file" > /dev/null
-            done
-          done
+      # Not from releases: caches saved on a tag can only be read by that tag,
+      # so they would just push out the ones pull requests use.
+      - name: Save Cargo dependencies and build artifacts
+        if: github.ref_type != 'tag' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Builds on musl, as the static release binaries do, and checks the image
   # starts. Releases copy their own binaries into the image instead.

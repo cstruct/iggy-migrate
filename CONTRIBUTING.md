@@ -11,26 +11,22 @@ The toolchain is pinned in `mise.toml`. With [mise](https://mise.jdx.dev):
 mise install
 ```
 
-This installs the Rust version CI uses, with rustfmt and clippy, and
-cargo-deny. Docker is needed for rehearsals, `verify` and `squash`.
+This installs the Rust version CI uses, with rustfmt and clippy,
+cargo-deny and actionlint. Docker is needed for rehearsals, `verify` and `squash`.
 
 ## Checks
 
-CI runs these on every pull request; run them before pushing:
+CI runs these on every pull request, and again on a release's tagged commit,
+but not on pushes to `main`; run them before pushing:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-mise run deny
+mise run lint   # formatting, cargo-deny, clippy and actionlint
+mise run test   # the tests, and the example migrations in every environment
 ```
 
-`mise run deny` checks the dependencies for security advisories, licenses
+cargo-deny checks the dependencies for security advisories, licenses
 (permissive only) and sources against `deny.toml`. A new advisory that doesn't
 apply goes in its `ignore` list, with why.
-
-CI also evaluates the example migrations in `migrations/` in every
-environment.
 
 ## Local server
 
