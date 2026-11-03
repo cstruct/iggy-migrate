@@ -20,6 +20,25 @@ pub enum Status {
     /// A baseline marked applied without running it, because every migration
     /// it replaces had already been applied.
     Baselined,
+    /// Recorded as applied by `ledger accept`, with the checksum the file had
+    /// then, without running it. Unlike `Applied`, it replaces an earlier
+    /// applied event for the same id.
+    Accepted,
+    /// Undoes the earlier applied events for the id, by `ledger forget`, so the
+    /// migration is pending again or, if its file is gone, no longer missing.
+    Forgotten,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Applied => "applied",
+            Status::Failed => "failed",
+            Status::Baselined => "baselined",
+            Status::Accepted => "accepted",
+            Status::Forgotten => "forgotten",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +51,9 @@ pub struct Event {
     pub ops: Vec<Op>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Why a repair (`accept` or `forget`) was made, as given with `--reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// For a baseline, the ids of the migrations it replaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaces: Vec<String>,
