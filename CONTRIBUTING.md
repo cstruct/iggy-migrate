@@ -94,8 +94,16 @@ mise run release:bump 0.2.0
 
 This pulls `main`, sets the version in `Cargo.toml` and `Cargo.lock`, moves
 the changelog's `## Unreleased` entries under `## 0.2.0 - <today>`, commits
-"Release 0.2.0", pushes it straight to `main` and pushes the tag `v0.2.0`. The
-tag starts the release workflow, which runs CI on the tagged commit, builds
+"Release 0.2.0" on a new `release/v0.2.0` branch, pushes it, opens a pull
+request for it and switches back to `main`. Once the pull request is merged:
+
+```bash
+mise run release:tag
+```
+
+This pulls `main` and tags it `v0.2.0`, the version in `Cargo.toml`, and
+pushes the tag. It refuses if that version is already tagged, as it is until
+the pull request is merged. The tag starts the release workflow, which runs CI on the tagged commit, builds
 binaries for Linux (x86_64 and arm64, glibc 2.35 and later, and static musl)
 and macOS (arm64), and publishes them with `SHA256SUMS` as a GitHub release,
 with the version's changelog entries as its notes. It also pushes the Docker
