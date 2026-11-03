@@ -5,6 +5,8 @@ All notable changes to iggy-migrate. Versions follow
 
 ## Unreleased
 
+## 1.0.0 - 2026-11-03
+
 ### Breaking
 
 - `status` and `drift` exit 2 instead of 1 when they find something, like

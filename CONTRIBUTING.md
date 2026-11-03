@@ -95,7 +95,9 @@ mise run release:bump 0.2.0
 This pulls `main`, sets the version in `Cargo.toml` and `Cargo.lock`, moves
 the changelog's `## Unreleased` entries under `## 0.2.0 - <today>`, commits
 "Release 0.2.0" on a new `release/v0.2.0` branch, pushes it, opens a pull
-request for it and switches back to `main`. Once the pull request is merged:
+request for it and switches back to `main`. On any other branch it commits
+"Release 0.2.0" there instead and pushes nothing, so the bump goes out with
+that branch's pull request. Once the pull request with the bump is merged:
 
 ```bash
 mise run release:tag
@@ -116,5 +118,5 @@ request.
 A version with a suffix, such as `0.2.0-rc.1`, is published as a prerelease.
 It leaves the changelog alone, and its release notes are generated from the
 pull requests since the last release. The task refuses a dirty working tree,
-another branch, anything that isn't a version, and a release with nothing
+a detached `HEAD`, anything that isn't a version, and a release with nothing
 under `## Unreleased`.
