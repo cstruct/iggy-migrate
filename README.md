@@ -1,5 +1,13 @@
 # iggy-migrate
 
+> [!WARNING]
+> **This project is built with heavy use of LLMs.** Most of its code, tests and
+> documentation were written by an AI coding assistant (Claude), directed by
+> the maintainer. Review it as you would any unfamiliar dependency before you
+> trust it with servers that hold data you care about, and please
+> [report](https://github.com/cstruct/iggy-migrate/issues) anything that looks
+> wrong.
+
 Version-controlled, reviewable changes to [Apache Iggy](https://iggy.apache.org)
 streams, topics and consumer groups.
 
