@@ -60,8 +60,7 @@ impl Migration {
 /// When a baseline is itself squashed, the migrations it replaced are carried
 /// along with `parent` naming it, so servers that applied the originals but
 /// never the intermediate baseline are still recognised. It is a flat list,
-/// as it was when baselines were Dhall (which has no recursive types), so
-/// baselines rewritten from Dhall keep their checksums.
+/// and part of the baseline's checksum, so it must stay one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Replaced {
@@ -83,14 +82,8 @@ pub fn load_dir(dir: &Path, env: &Env) -> Result<Vec<Migration>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("star") => paths.push(path),
-            Some("dhall") => bail!(
-                "{}: Dhall migrations are no longer supported. Rewrite it as a .star file with \
-                 the same ops; the checksum stays the same, so it stays applied",
-                path.display()
-            ),
-            _ => {}
+        if path.extension().is_some_and(|e| e == "star") {
+            paths.push(path);
         }
     }
     paths.sort();
