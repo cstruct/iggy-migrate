@@ -11,26 +11,22 @@ The toolchain is pinned in `mise.toml`. With [mise](https://mise.jdx.dev):
 mise install
 ```
 
-This installs the Rust version CI uses, with rustfmt and clippy, and
-cargo-deny. Docker is needed for rehearsals, `verify` and `squash`.
+This installs the Rust version CI uses, with rustfmt and clippy,
+cargo-deny and actionlint. Docker is needed for rehearsals, `verify` and `squash`.
 
 ## Checks
 
-CI runs these on every pull request; run them before pushing:
+CI runs these on every pull request, and again on a release's tagged commit,
+but not on pushes to `main`; run them before pushing:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-mise run deny
+mise run lint   # formatting, cargo-deny, clippy and actionlint
+mise run test   # the tests, and the example migrations in every environment
 ```
 
-`mise run deny` checks the dependencies for security advisories, licenses
+cargo-deny checks the dependencies for security advisories, licenses
 (permissive only) and sources against `deny.toml`. A new advisory that doesn't
 apply goes in its `ignore` list, with why.
-
-CI also evaluates the example migrations in `migrations/` in every
-environment.
 
 ## Local server
 
@@ -100,9 +96,14 @@ This pulls `main`, sets the version in `Cargo.toml` and `Cargo.lock`, moves
 the changelog's `## Unreleased` entries under `## 0.2.0 - <today>`, commits
 "Release 0.2.0", pushes it straight to `main` and pushes the tag `v0.2.0`. The
 tag starts the release workflow, which runs CI on the tagged commit, builds
-binaries for Linux (x86_64 and arm64, glibc 2.35 and later) and macOS (arm64),
-and publishes them with `SHA256SUMS` as a GitHub release, with the version's
-changelog entries as its notes.
+binaries for Linux (x86_64 and arm64, glibc 2.35 and later, and static musl)
+and macOS (arm64), and publishes them with `SHA256SUMS` as a GitHub release,
+with the version's changelog entries as its notes. It also pushes the Docker
+image, with the musl binaries copied in, to `ghcr.io/cstruct/iggy-migrate`
+as `<version>`, and for releases also as `<major>.<minor>` and `latest`.
+
+`docker build .` builds the image from source, as CI does on every pull
+request.
 
 A version with a suffix, such as `0.2.0-rc.1`, is published as a prerelease.
 It leaves the changelog alone, and its release notes are generated from the

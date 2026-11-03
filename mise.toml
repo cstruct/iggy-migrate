@@ -3,6 +3,25 @@
 rust = { version = "1.99.0", components = "rustfmt,clippy" }
 # Checks the dependencies for security advisories, licenses and sources, see deny.toml.
 "github:EmbarkStudios/cargo-deny" = "0.19.9"
+# Lints the GitHub Actions workflows.
+"github:rhysd/actionlint" = "1.7.7"
+
+[tasks.lint]
+description = "Check formatting, lints, the dependencies and the CI workflows"
+run = [
+  "cargo fmt --all --check",
+  "cargo deny --locked check",
+  "cargo clippy --locked --all-targets --all-features -- -D warnings",
+  "actionlint",
+]
+
+[tasks.test]
+description = "Run the tests, and evaluate the example migrations in every environment"
+run = [
+  "cargo test --locked --all-features",
+  # Only evaluated: `verify` would need Docker for its throwaway server.
+  "for env in dev staging prod; do for file in migrations/*.star; do cargo run --locked -q -- --env \"$env\" eval \"$file\" > /dev/null || exit 1; done; done",
+]
 
 [tasks.deny]
 description = "Check the dependencies for security advisories, licenses and sources"
