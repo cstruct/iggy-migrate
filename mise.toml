@@ -9,7 +9,7 @@ description = "Check the dependencies for security advisories, licenses and sour
 run = "cargo deny --locked check"
 
 [tasks."release:bump"]
-description = "Set the release version everywhere it is recorded, then commit, tag and push the release"
+description = "Set the release version everywhere it is recorded, date the changelog, then commit, tag and push the release"
 usage = 'arg "<version>" help="The new version, such as 1.3.0 or 1.3.0-rc.1"'
 run = """
 set -eu
@@ -20,6 +20,16 @@ test -z "$(git status --porcelain)" || { echo "The working tree has uncommitted 
 # Releases are made from main.
 test "$(git branch --show-current)" = main || { echo "Not on main" >&2; exit 1; }
 git pull -q --ff-only
+# A release takes the changelog's Unreleased entries as its own; a prerelease
+# leaves them for the release.
+case "$version" in
+*-*) ;;
+*)
+  awk '/^## Unreleased/ { f = 1; next } /^## / { f = 0 } f && NF' CHANGELOG.md | grep -q . ||
+    { echo "CHANGELOG.md has nothing under ## Unreleased" >&2; exit 1; }
+  perl -pi -e "s/^## Unreleased\\$/## Unreleased\\n\\n## $version - $(date -u +%Y-%m-%d)/" CHANGELOG.md
+  ;;
+esac
 test "$(grep -c '^version = ' "Cargo.toml")" = 1
 perl -pi -e "s/^version = \\"[^\\"]*\\"/version = \\"$version\\"/" "Cargo.toml"
 cargo update -q --workspace
