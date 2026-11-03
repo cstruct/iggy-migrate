@@ -84,7 +84,7 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show applied, pending and changed migrations. Exits 1 if any are
+    /// Show applied, pending and changed migrations. Exits 2 if any are
     /// CHANGED, PARTIAL or MISSING.
     Status {
         /// Print JSON instead of text.
@@ -112,7 +112,7 @@ enum Command {
         allow_deletes: bool,
     },
     /// Compare the server with what the applied migrations created, to find
-    /// resources created, changed or deleted by hand. Exits 1 on drift.
+    /// resources created, changed or deleted by hand. Exits 2 on drift.
     Drift {
         /// Print JSON instead of text.
         #[arg(long)]
@@ -150,12 +150,27 @@ enum LedgerCommand {
     Import,
 }
 
+/// What `status`, `plan --detailed-exitcode` and `drift` exit with when they
+/// find something. Errors, including invalid arguments, exit 1, so CI can tell
+/// the two apart.
+fn findings() -> ExitCode {
+    ExitCode::from(2)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            // clap exits 2 on invalid arguments, which would read as findings.
+            return if e.use_stderr() { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+        }
+    };
     // On Ctrl-C the `run` future is dropped, which removes any rehearsal
     // container it started.
     let result = tokio::select! {
-        result = run(Cli::parse()) => result,
+        result = run(cli) => result,
         _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
     };
     match result {
@@ -259,7 +274,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 report.print();
             }
-            Ok(if report.is_clean() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+            Ok(if report.is_clean() { ExitCode::SUCCESS } else { findings() })
         }
         Command::Plan { json, detailed_exitcode } => {
             report.ensure_clean()?;
@@ -286,7 +301,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     out!("nothing to apply");
                 }
             }
-            Ok(if detailed_exitcode && !report.is_up_to_date() { ExitCode::from(2) } else { ExitCode::SUCCESS })
+            Ok(if detailed_exitcode && !report.is_up_to_date() { findings() } else { ExitCode::SUCCESS })
         }
         Command::Up { skip_rehearsal, .. } => {
             report.ensure_clean()?;
@@ -330,7 +345,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     out!("no drift: the server matches the {} applied migration(s)", applied.len());
                 }
             }
-            Ok(if items.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+            Ok(if items.is_empty() { ExitCode::SUCCESS } else { findings() })
         }
         Command::New { .. }
         | Command::Eval { .. }
@@ -458,7 +473,7 @@ fn ensure_no_deletes(report: &Report<'_>) -> Result<()> {
         eprintln!("pending migrations delete resources:\n{}", deletes.join("\n"));
         bail!(
             "deleting drops their messages and consumer offsets for good; review with `plan`, then \
-             rerun with --allow-deletes (or IGGY_MIGRATE_ALLOW_DELETES=true)"
+             rerun with --allow-deletes (or IGGY_MIGRATE__ALLOW_DELETES=true)"
         );
     }
     Ok(())

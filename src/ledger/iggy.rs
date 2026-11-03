@@ -58,7 +58,12 @@ pub async fn ensure(client: &IggyClient) -> Result<()> {
 /// Reads every event in the ledger, oldest first. A missing ledger reads as
 /// empty, so read-only commands never create it.
 pub async fn read(client: &IggyClient) -> Result<Vec<Event>> {
-    if client.get_topic(&stream_id(), &topic_id()).await.ok().flatten().is_none() {
+    // Checks the stream first, as asking for a topic in a missing stream is an
+    // error. Other errors, such as a lack of permissions, must not read as an
+    // empty ledger, which would make every migration look pending.
+    if client.get_stream(&stream_id()).await.context("reading ledger stream")?.is_none()
+        || client.get_topic(&stream_id(), &topic_id()).await.context("reading ledger topic")?.is_none()
+    {
         return Ok(Vec::new());
     }
     let consumer = Consumer::new(Identifier::named(CONSUMER)?);
