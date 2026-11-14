@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Only COPY from here on, so building for another architecture runs nothing.
 # Alpine comes with the CA certificates the Postgres ledger's TLS uses.
-FROM alpine:3.22 AS base
+FROM alpine:3.24 AS base
 # Rehearsals, `verify` and `squash` start throwaway Iggy servers with it.
 COPY --from=docker:29.8-cli /usr/local/bin/docker /usr/local/bin/docker
 LABEL org.opencontainers.image.title="iggy-migrate" \
