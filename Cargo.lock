@@ -46,6 +46,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -60,6 +61,22 @@ dependencies = [
  "ctr",
  "ctutils",
  "ghash",
+ "zeroize",
+]
+
+[[package]]
+name = "aes-gcm-siv"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ctutils",
+ "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -1705,6 +1722,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2eecf2d5dc9b66b732b97707a0210906b1d30523eb773193ab777c0c84b3e8d5"
 dependencies = [
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -2074,8 +2092,8 @@ dependencies = [
  "flume",
  "futures",
  "futures-util",
- "iggy_binary_protocol",
- "iggy_common",
+ "iggy_binary_protocol 0.11.0",
+ "iggy_common 0.11.0",
  "quinn",
  "reqwest",
  "reqwest-middleware",
@@ -2103,7 +2121,7 @@ dependencies = [
  "facet",
  "humantime",
  "iggy",
- "iggy_common",
+ "iggy_common 0.12.0",
  "ordna-core",
  "ordna-source-env",
  "ordna-source-styx",
@@ -2135,6 +2153,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "iggy_binary_protocol"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2799893b814292b83ca4ba33242b90377f2cc06d4c35aa15343e89705d61727"
+dependencies = [
+ "bytemuck",
+ "bytes",
+ "enumset",
+ "ring",
+ "secrecy",
+ "serde",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
 name = "iggy_common"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2153,8 +2187,47 @@ dependencies = [
  "comfy-table",
  "derive_more 2.1.1",
  "humantime",
- "iggy_binary_protocol",
+ "iggy_binary_protocol 0.11.0",
  "papaya",
+ "ring",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tungstenite",
+ "twox-hash",
+ "ulid",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "iggy_common"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f354bd7083ed284ee72cabcf22c5046732a49a8958571f5ca569eee4979996bb"
+dependencies = [
+ "aes-gcm",
+ "aes-gcm-siv",
+ "async-broadcast",
+ "async-trait",
+ "base64 0.23.1",
+ "blake3",
+ "bon",
+ "byte-unit",
+ "bytes",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "derive_more 2.1.1",
+ "humantime",
+ "iggy_binary_protocol 0.12.0",
+ "papaya",
+ "pin-project-lite",
  "ring",
  "secrecy",
  "serde",
@@ -2894,6 +2967,7 @@ dependencies = [
  "cpubits",
  "cpufeatures",
  "universal-hash",
+ "zeroize",
 ]
 
 [[package]]
